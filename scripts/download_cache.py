@@ -21,7 +21,7 @@ def download_cache(cache_dir) -> bool:
     :returns: bool, True when cells were installed.
     """
     cache_root = Path(cache_dir)
-    if any(cache_root.glob("*.json")):
+    if any(path for path in cache_root.rglob("*.json") if path.parent.name != "perms.v1"):
         return False
 
     url = os.environ.get("MINIFLASH_CACHE_URL", CACHE_URL)

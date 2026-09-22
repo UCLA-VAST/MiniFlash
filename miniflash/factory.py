@@ -22,8 +22,7 @@ class FactorySpec:
     dim_j: int
     #: layers of K between two produced magic states
     interval_k: int
-    #: draw production boxes in the layout (False: states appear at the
-    #: lane face with no geometry, e.g. off-chip supply)
+    #: draw production boxes in the layout (False = off-chip supply, no geometry)
     render: bool = True
 
 

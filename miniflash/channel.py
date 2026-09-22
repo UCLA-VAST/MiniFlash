@@ -19,14 +19,12 @@ move cannot reach any J corridor the packer raises
 corridor, and eviction of parked qubits stays the caller's policy.
 
 :func:`plan_blocks` renders a solved single-row channel as Cell-style
-geometry blocks. Block parities follow the wire convention: each lane's
-``parity_in`` rides its K and I runs, J-hops carry the flipped bit, and a
-``parity_in != parity_out`` mismatch lands a hadamard on the last K unit.
-Synthesized cells read parity from face colors instead, which flips at
-I-K corners and holds across J-hops; the two conventions agree only on K
-pins, where the worlds meet. Until they are unified, channel blocks must
-not be fed to the orientation transforms, whose parity rules assume face
-colors.
+geometry blocks in the synthesized-cell colour convention: a lane's
+parity rides its K runs, J hops and I runs alike (a jog turns through
+J–I corners, which keep colour; only I–K junctions flip it), and a lane
+arriving at parity 1 whose consumer expects 0 lands a
+hadamard on the last K unit — the wall that pays the owed Hadamard and
+brings the wire back to standard colour.
 """
 from dataclasses import dataclass
 
@@ -276,7 +274,7 @@ def _pack(channel, dense):
     movers = [(qubit, lane.start, lane.end) for qubit, lane in sorted(channel.lanes.items()) if lane.start != lane.end]
     scratch_slot = channel.scratch[0] if channel.scratch else None
     if channel.width is None and scratch_slot is None and movers:
-        columns = [slot[1] for _, start, end in movers for slot in (start, end)]
+        columns = [slot[1] for lane in channel.lanes.values() for slot in (lane.start, lane.end)]
         scratch_slot = (0, max(columns) + 1)
     ordered = _sequence(movers, scratch_slot)
     predecessors = _predecessors(ordered)
@@ -337,71 +335,6 @@ def solve(channel, packer="best") -> RearrangementPlan:
     return dense_plan if dense_plan.levels <= serial_plan.levels else serial_plan
 
 
-def check_plan(plan) -> list:
-    """Independently verify a RearrangementPlan.
-
-    Replays the plan level by level and reports conflicts the packers must
-    never produce: same-level same-plane interval overlaps, corridor
-    collisions and static crossings, vacate-before-occupy violations, and
-    a final position map that differs from the requested lanes.
-
-    :param plan: RearrangementPlan.
-    :returns: list[str] problems (empty = valid).
-    """
-    problems = []
-    channel = plan.channel
-    by_level = {}
-    for move in plan.moves:
-        by_level.setdefault(move.level, []).append(move)
-
-    def endpoints(move):
-        if isinstance(move, GridMove):
-            return move.src, move.dst
-        return (0, move.from_column), (0, move.to_column)
-
-    def segments(move):
-        if isinstance(move, GridMove):
-            return move.path
-        low, high = min(move.from_column, move.to_column), max(move.from_column, move.to_column)
-        return (("I", 0, move.plane, low, high),)
-
-    for level_index, level_moves in sorted(by_level.items()):
-        level = _Level()
-        for move in level_moves:
-            for segment in segments(move):
-                if segment[0] == "I":
-                    _, row, plane, low, high = segment
-                    if not level.interval_fits(row, plane, low, high):
-                        problems.append(f"level {level_index}: interval conflict at row {row} plane {plane} [{low},{high}]")
-                    level.add_interval(row, plane, low, high)
-                else:
-                    _, column, row_low, row_high = segment
-                    if _corridor_blockers(channel, column, row_low, row_high):
-                        problems.append(f"level {level_index}: corridor {column} crosses static slots")
-                    if not level.corridor_fits(column, row_low, row_high):
-                        problems.append(f"level {level_index}: corridor conflict at column {column}")
-                    level.add_corridor(column, row_low, row_high)
-
-    position = {qubit: lane.start for qubit, lane in channel.lanes.items()}
-    occupied = {lane.start for lane in channel.lanes.values()} | set(channel.static)
-    for level_index, level_moves in sorted(by_level.items()):
-        for move in level_moves:
-            source, _ = endpoints(move)
-            if position.get(move.qubit) != source:
-                problems.append(f"level {level_index}: qubit {move.qubit} moves from {source} but sits at {position.get(move.qubit)}")
-            occupied.discard(source)
-        for move in level_moves:
-            _, destination = endpoints(move)
-            if destination in occupied:
-                problems.append(f"level {level_index}: qubit {move.qubit} lands on occupied slot {destination}")
-            position[move.qubit] = destination
-            occupied.add(destination)
-    for qubit, lane in channel.lanes.items():
-        if position[qubit] != lane.end:
-            problems.append(f"qubit {qubit} ends at {position[qubit]} instead of {lane.end}")
-    return problems
-
-
 def _k_run(blocks, column, k_start, k_end, parity):
     for k in range(k_start + 1, k_end, 2):
         blocks.append({"kind": "pipe", "pos": [2 * column, 2, k], "axis": "K", "parity": parity})
@@ -412,10 +345,10 @@ def plan_blocks(plan, height):
 
     Local coordinates: i = 2×column, the wire plane at j=2 with jog planes
     at j=0/4 (hops crossing j=1/3), k from 0 (below the upper layer) to
-    ``height``. Parities follow the wire convention — each lane's
-    ``parity_in`` rides its K and I runs, J-hops carry the flipped bit,
-    and a ``parity_in != parity_out`` mismatch lands a hadamard on the
-    last K unit before the consuming cell.
+    ``height``. Parities follow the synthesized-cell colour convention —
+    each lane's ``parity_in`` rides its K runs, J hops and I runs — and a
+    ``parity_in != parity_out`` mismatch lands a
+    hadamard on the last K unit before the consuming cell.
 
     :param plan: RearrangementPlan over row-0 lanes.
     :param height: int, gap height in K units (even).
@@ -428,7 +361,6 @@ def plan_blocks(plan, height):
     blocks = []
     for qubit, lane in sorted(plan.channel.lanes.items()):
         parity = lane.parity_in
-        hop_parity = 1 - parity
         column = lane.start[1]
         k = 0
         for move in sorted(by_qubit.get(qubit, []), key=lambda move: move.level):
@@ -436,11 +368,11 @@ def plan_blocks(plan, height):
             _k_run(blocks, column, k, jog, parity)
             run_j = move.plane * 2
             hop_j = 1 if move.plane == 0 else 3
-            blocks.append({"kind": "pipe", "pos": [2 * column, hop_j, jog], "axis": "J", "parity": hop_parity})
+            blocks.append({"kind": "pipe", "pos": [2 * column, hop_j, jog], "axis": "J", "parity": parity})
             step = 2 if move.to_column > column else -2
             for i in range(2 * column, 2 * move.to_column, step):
                 blocks.append({"kind": "pipe", "pos": [i + step // 2, run_j, jog], "axis": "I", "parity": parity})
-            blocks.append({"kind": "pipe", "pos": [2 * move.to_column, hop_j, jog], "axis": "J", "parity": hop_parity})
+            blocks.append({"kind": "pipe", "pos": [2 * move.to_column, hop_j, jog], "axis": "J", "parity": parity})
             column, k = move.to_column, jog
         if lane.parity_in != lane.parity_out:
             _k_run(blocks, column, k, height - 2, parity)

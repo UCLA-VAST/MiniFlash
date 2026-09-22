@@ -96,16 +96,10 @@ class Program:
     channels: list = field(default_factory=list)
     #: number of logical qubits
     num_qubits: int = 0
-    #: leftmost magic-lane column, None without injections
-    magic_column: int = None
-    #: 1 = right-side magic lanes; 2 = margin-column lanes on both sides
-    magic_sides: int = 1
     #: per layer, cell-band width in columns
     box_widths: list = field(default_factory=list)
     #: per layer, {qubit: (row, column)} parked slots
     parking: list = field(default_factory=list)
-    #: per layer, [exit map, entry map] of side moves as (lane, slot, plane)
-    sides: list = field(default_factory=list)
     #: {qubit: color bit} at the final boundary
     exit_colors: dict = field(default_factory=dict)
     #: FactorySpec driving the injections, None without T gates
@@ -127,11 +121,8 @@ class Program:
             "factories": self.factories,
 
             "num_qubits": self.num_qubits,
-            "magic_column": self.magic_column,
-            "magic_sides": self.magic_sides,
             "box_widths": list(self.box_widths),
             "parking": [[[qubit, list(slot)] for qubit, slot in layer.items()] for layer in self.parking],
-            "sides": [[[[qubit, list(entry)] for qubit, entry in group.items()] for group in layer] for layer in self.sides],
             "exit_colors": [[qubit, color] for qubit, color in self.exit_colors.items()],
             "macros": [{"kind": m.kind, "ref": ref_dict(m), "layer": m.layer, "row": m.row, "offset": m.offset, "qubits": list(m.qubits), "round": m.round, "slot": m.slot, "level": m.level} for m in self.macros],
             "nets": [{"qubit": n.qubit, "source": list(n.source), "sink": list(n.sink), "channel": n.channel, "track": n.track, "path": _deep_list(n.path), "color": n.color, "flip": n.flip} for n in self.nets],
@@ -156,11 +147,8 @@ class Program:
             factory=FactorySpec(**data["factory"]) if data.get("factory") else None,
             factories=data.get("factories", 0),
             num_qubits=data["num_qubits"],
-            magic_column=data["magic_column"],
-            magic_sides=data.get("magic_sides", 1),
             box_widths=list(data["box_widths"]),
             parking=[{qubit: tuple(slot) for qubit, slot in layer} for layer in data["parking"]],
-            sides=[[{qubit: tuple(entry) for qubit, entry in group} for group in layer] for layer in data["sides"]],
             exit_colors={qubit: color for qubit, color in data["exit_colors"]},
             macros=[MacroInstance(kind=m["kind"], ref=ref_load(m["kind"], m["ref"]), layer=m["layer"], row=m["row"], offset=m["offset"], qubits=tuple(m["qubits"]), round=m.get("round", 0), slot=m.get("slot", 0), level=m.get("level", -1)) for m in data["macros"]],
             nets=[Net(qubit=n["qubit"], source=tuple(n["source"]), sink=tuple(n["sink"]), channel=n["channel"], track=n["track"], path=_deep_tuple(n["path"]), color=n["color"], flip=n["flip"]) for n in data["nets"]],
@@ -218,15 +206,12 @@ def _normalized_placements(floorplan, layer_cells):
 
 def _parity_ledger(floorplan, placements):
     num_layers = len(placements)
-    side_exits = floorplan.side_exits if floorplan.side_exits else [{} for _ in range(num_layers)]
     exit_bits = []
     wire_bits = {qubit: 0 for qubit in range(floorplan.num_qubits)}
     for layer in range(num_layers):
         for cell, (_, offset, box_qubits) in placements[layer]:
             qubits = box_qubits if box_qubits is not None else list(floorplan.out_port_columns[layer])
             wire_bits.update(cell.pin_parities({qubit: floorplan.out_port_columns[layer][qubit] - offset for qubit in qubits if qubit in floorplan.out_port_columns[layer]}, "out"))
-        for qubit in side_exits[layer]:
-            wire_bits[qubit] = 0
         exit_bits.append(dict(wire_bits))
     return exit_bits
 
@@ -260,7 +245,7 @@ def _assert_hadamard_ledger(floorplan, placements, exit_bits):
                 if qubit not in floorplan.in_port_columns[layer]:
                     continue
                 if cell.in_bases.get(qubit, 0) != arriving.get(qubit, 0):
-                    raise RuntimeError(f"elaborate: hadamard ledger mismatch at layer {layer}, qubit {qubit}: wire delivers bit {arriving.get(qubit, 0)} but the cell was synthesized against in_bases {cell.in_bases.get(qubit, 0)} — flip landings and cell compensation have diverged")
+                    raise RuntimeError(f"elaborate: hadamard ledger mismatch at layer {layer}, qubit {qubit}: wire delivers bit {arriving.get(qubit, 0)} but the cell was placed against in_bases {cell.in_bases.get(qubit, 0)} — flip landings and ledger have diverged")
 
 
 def elaborate(floorplan, layer_cells, events=(), channels=(), factory=None, factories=1):
@@ -273,7 +258,7 @@ def elaborate(floorplan, layer_cells, events=(), channels=(), factory=None, fact
     :param factory: FactorySpec | None.
     :param factories: int, factory units.
     :returns: Program — cell/factory/injection macros, parity-colored inter-layer
-        nets (flip marks a Hadamard landing), channels, parking, sides and exit colors.
+        nets (flip marks a Hadamard landing), channels, parking and exit colors.
     """
     points = place_injections(events, channels, floorplan, factory=factory, factories=factories) if events else []
     placements = _normalized_placements(floorplan, layer_cells)
@@ -319,8 +304,4 @@ def elaborate(floorplan, layer_cells, events=(), channels=(), factory=None, fact
         parking = [dict(floorplan.parked_slots[layer]) for layer in range(num_layers)]
     else:
         parking = [{qubit: (0, col) for qubit, col in floorplan.lane_columns[layer].items()} for layer in range(num_layers)]
-    side_exits = floorplan.side_exits if floorplan.side_exits else [{} for _ in range(num_layers)]
-    side_entries = floorplan.side_entries if floorplan.side_entries else [{} for _ in range(num_layers)]
-    sides = [[{qubit: (move.lane_column, move.slot, move.plane) for qubit, move in side_exits[layer].items()}, {qubit: (move.lane_column, move.slot, move.plane) for qubit, move in side_entries[layer].items()}] for layer in range(num_layers)]
-
-    return Program(die_dims=floorplan.die_dims, rows=floorplan.rows, macros=macros, nets=nets, channels=channels, num_qubits=floorplan.num_qubits, magic_column=floorplan.magic_column, magic_sides=floorplan.magic_sides, box_widths=list(floorplan.box_widths), parking=parking, sides=sides, exit_colors=dict(exit_bits[-1]) if exit_bits else {}, factory=factory if points else None, factories=factories if factory is not None and points else 0)
+    return Program(die_dims=floorplan.die_dims, rows=floorplan.rows, macros=macros, nets=nets, channels=channels, num_qubits=floorplan.num_qubits, box_widths=list(floorplan.box_widths), parking=parking, exit_colors=dict(exit_bits[-1]) if exit_bits else {}, factory=factory if points else None, factories=factories if factory is not None and points else 0)

@@ -27,9 +27,9 @@ from .factory import FACTORIES, FactorySpec, correction_for, get_factory
 from .gltf import write_gltf
 from .lower import build_layout, check_program
 from .parse import parse
-from .partition import partition, split_region
+from .partition import partition, partition_t_layers, split_region
 from .program import Program, elaborate
-from .synthesis import SynthTimeout, SynthUnsat, VerifyFailed, synthesize
+from .synthesis import ENGINES, SynthTimeout, SynthUnsat, synthesize
 
 __version__ = "0.0.1"
 
@@ -39,14 +39,15 @@ __all__ = [
     "Program",
     "SynthTimeout",
     "SynthUnsat",
-    "VerifyFailed",
     "build_layout",
     "correction_for",
     "elaborate",
     "get_factory",
     "parse",
     "partition",
+    "partition_t_layers",
     "split_region",
+    "ENGINES",
     "synthesize",
     "write_gltf",
 ]

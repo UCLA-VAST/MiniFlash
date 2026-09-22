@@ -6,117 +6,7 @@ next cell does not consume are swapped out to straight parking lanes and
 swapped back on demand; the resulting channel rearrangements are solved
 by :func:`miniflash.channel.solve`. A pure function; there is no search.
 """
-import heapq
-
-from .floorplan import Floorplan, INJECTION_BANDWIDTH, SideMove
-
-
-def _parked_intervals(member_sets, num_qubits):
-    num_layers = len(member_sets)
-    members = [set(layer_members) for layer_members in member_sets]
-
-    intervals = []
-    for qubit in range(num_qubits):
-        start = None
-        for layer in range(num_layers):
-            if qubit not in members[layer] and start is None:
-                start = layer
-            if qubit in members[layer] and start is not None:
-                intervals.append((start, layer, qubit))
-                start = None
-        if start is not None:
-            intervals.append((start, num_layers, qubit))
-
-    return intervals
-
-
-def _assign_lanes(intervals, strict=False):
-    assignment = {}
-    free_lanes = []
-    active = []
-    next_lane = 0
-
-    for start, end, qubit in sorted(intervals):
-        while active and (active[0][0] < start if strict else active[0][0] <= start):
-            _, lane = heapq.heappop(active)
-            heapq.heappush(free_lanes, lane)
-        if free_lanes:
-            lane = heapq.heappop(free_lanes)
-        else:
-            lane = next_lane
-            next_lane += 1
-        assignment[(qubit, start, end)] = lane
-        heapq.heappush(active, (end, lane))
-
-    return assignment, next_lane
-
-
-def _intervals_by_qubit(lane_column_of):
-    by_qubit = {}
-    for (qubit, start, end), column in lane_column_of.items():
-        by_qubit.setdefault(qubit, []).append((start, end, column))
-    return by_qubit
-
-
-def _assign_layer_columns(layers, num_qubits, lane_column_of):
-    num_layers = len(layers)
-    unions = [[qubit for box in boxes for qubit in box] for boxes in layers]
-    by_qubit = _intervals_by_qubit(lane_column_of)
-
-    def lane_column(qubit, layer):
-        for start, end, column in by_qubit.get(qubit, []):
-            if start <= layer < end:
-                return column
-        raise KeyError(f"qubit {qubit} not parked at layer {layer}")
-
-    in_port_columns, out_port_columns, lane_columns, box_layouts = [], [], [], []
-    position = {}
-    for qubit in range(num_qubits):
-        if qubit not in set(unions[0]):
-            position[qubit] = lane_column(qubit, 0)
-
-    for layer in range(num_layers):
-        boxes = layers[layer]
-        member_set = set(unions[layer])
-        if len(boxes) > 1:
-            boxes = sorted(boxes, key=lambda box: sum(position.get(qubit, qubit) for qubit in box) / len(box))
-        next_members = set(unions[layer + 1]) if layer + 1 < num_layers else member_set
-
-        in_columns, out_columns, layouts = {}, {}, []
-        offset = 0
-        for box in boxes:
-            arrived = sorted(box, key=lambda qubit: position.get(qubit, qubit))
-            for rank, qubit in enumerate(arrived):
-                in_columns[qubit] = offset + rank + 1
-            stayers = [qubit for qubit in arrived if qubit in next_members]
-            swap_outs = [qubit for qubit in arrived if qubit not in next_members]
-            swap_outs.sort(key=lambda qubit: lane_column(qubit, layer + 1) if layer + 1 < num_layers else 0)
-            for rank, qubit in enumerate(stayers + swap_outs):
-                out_columns[qubit] = offset + rank + 1
-            layouts.append((0, offset, list(box)))
-            offset += len(box) + 2
-
-        in_port_columns.append(in_columns)
-        out_port_columns.append(out_columns)
-        lane_columns.append({qubit: lane_column(qubit, layer) for qubit in range(num_qubits) if qubit not in member_set})
-        box_layouts.append(layouts)
-        for qubit in range(num_qubits):
-            if qubit in member_set:
-                position[qubit] = out_columns[qubit]
-            elif layer + 1 < num_layers and qubit not in next_members:
-                position[qubit] = lane_column(qubit, layer + 1)
-            elif layer + 1 < num_layers:
-                position[qubit] = lane_column(qubit, layer)
-
-    return in_port_columns, out_port_columns, lane_columns, box_layouts
-
-
-def _assign_side_slots(side_moves_by_layer, plane):
-    slotted = []
-    for layer_moves in side_moves_by_layer:
-        ordered = sorted(layer_moves, key=lambda move: move[1])
-        slotted.append({qubit: SideMove(qubit=qubit, lane_column=lane_column, slot=index, plane=plane) for index, (qubit, lane_column) in enumerate(ordered)})
-    return slotted
+from .floorplan import Floorplan
 
 
 def _stable_layer_columns(layers, num_qubits):
@@ -196,15 +86,13 @@ def _stable_layer_columns(layers, num_qubits):
 
 
 
-def solve_1d(layers, num_qubits, side_ports, with_magic):
+def solve_1d(layers, num_qubits):
     """Solve the 1-D floorplan: port columns, lanes, channel moves, gap levels.
 
     :param layers: list per layer of per-box qubit lists.
     :param num_qubits: int.
-    :param side_ports: bool, park/unpark through cell side faces.
-    :param with_magic: bool, reserve the magic-state columns.
     :returns: Floorplan.
-    :raises ValueError: on empty/duplicate layers or side_ports with multi-box layers.
+    :raises ValueError: on empty/duplicate layers.
     """
     for layer, boxes in enumerate(layers):
         union = [qubit for box in boxes for qubit in box]
@@ -214,40 +102,15 @@ def solve_1d(layers, num_qubits, side_ports, with_magic):
             raise ValueError(f"solve_floorplan: layer {layer} members out of range")
         if len(set(union)) != len(union):
             raise ValueError(f"solve_floorplan: layer {layer} has duplicate members")
-        if side_ports and len(boxes) > 1:
-            raise ValueError("solve_floorplan: side_ports requires single-box layers")
 
     num_layers = len(layers)
     box_widths = [sum(len(box) + 2 for box in boxes) for boxes in layers]
     max_box_width = max(box_widths)
-    member_unions = [[qubit for box in boxes for qubit in box] for boxes in layers]
-    if side_ports:
-        intervals = _parked_intervals(member_unions, num_qubits)
-        assignment, num_lanes = _assign_lanes(intervals, strict=True)
-        first_lane_column = max_box_width + 1
-        lane_column_of = {key: first_lane_column + lane for key, lane in assignment.items()}
-        in_port_columns, out_port_columns, lane_columns, box_layouts = _assign_layer_columns(layers, num_qubits, lane_column_of)
-    else:
-        num_lanes = 0
-        in_port_columns, out_port_columns, lane_columns, box_layouts = _stable_layer_columns(layers, num_qubits)
-        max_box_width = max((max((offset + len(box) + 2 for _, offset, box in layout), default=0) for layout in box_layouts), default=max_box_width)
-        max_box_width = max(max_box_width, max((col + 1 for lanes in lane_columns for col in lanes.values()), default=0))
-        first_lane_column = max_box_width
-
-    exit_moves, entry_moves = [[] for _ in range(num_layers)], [[] for _ in range(num_layers)]
-    if side_ports:
-        for (qubit, start, end), column in lane_column_of.items():
-            if start > 0:
-                exit_moves[start - 1].append((qubit, column))
-            if end < num_layers:
-                entry_moves[end].append((qubit, column))
-    side_exits = _assign_side_slots(exit_moves, 2)
-    side_entries = _assign_side_slots(entry_moves, 0)
-    for layer in range(num_layers):
-        for qubit in side_exits[layer]:
-            del out_port_columns[layer][qubit]
-        for qubit in side_entries[layer]:
-            del in_port_columns[layer][qubit]
+    num_lanes = 0
+    in_port_columns, out_port_columns, lane_columns, box_layouts = _stable_layer_columns(layers, num_qubits)
+    max_box_width = max((max((offset + len(box) + 2 for _, offset, box in layout), default=0) for layout in box_layouts), default=max_box_width)
+    max_box_width = max(max_box_width, max((col + 1 for lanes in lane_columns for col in lanes.values()), default=0))
+    first_lane_column = max_box_width
 
     scratch_column = first_lane_column + num_lanes
     any_cycle = False
@@ -267,10 +130,4 @@ def solve_1d(layers, num_qubits, side_ports, with_magic):
         moves.append(list(plan.moves))
         gap_levels.append(plan.levels)
 
-    base_width = first_lane_column + num_lanes + (1 if any_cycle else 0)
-    magic_column = None
-    if with_magic:
-        magic_column = base_width
-        base_width += 2 * INJECTION_BANDWIDTH - 1
-
-    return Floorplan(num_qubits=num_qubits, box_widths=box_widths, in_port_columns=in_port_columns, out_port_columns=out_port_columns, lane_columns=lane_columns, moves=moves, gap_levels=gap_levels, side_exits=side_exits, side_entries=side_entries, magic_column=magic_column, placements=box_layouts)
+    return Floorplan(num_qubits=num_qubits, box_widths=box_widths, in_port_columns=in_port_columns, out_port_columns=out_port_columns, lane_columns=lane_columns, moves=moves, gap_levels=gap_levels, placements=box_layouts)

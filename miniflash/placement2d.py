@@ -11,13 +11,12 @@ from .channel import ChannelInfeasible, Lane, RearrangementChannel, solve
 from .floorplan import Floorplan
 
 
-def solve_2d(layers, num_qubits, die_dims, with_magic):
+def solve_2d(layers, num_qubits, die_dims):
     """Solve the 2-D (die-mode) floorplan: slot-stable placement plus 2-D grid moves.
 
     :param layers: list per layer of per-box qubit lists.
     :param num_qubits: int.
     :param die_dims: (width, rows | None), width is a hard cap.
-    :param with_magic: bool, reserve the magic lane.
     :returns: Floorplan (die_dims/rows/grid_moves populated).
     :raises ValueError: when a box cannot fit the die.
     """
@@ -143,4 +142,4 @@ def solve_2d(layers, num_qubits, die_dims, with_magic):
         else:
             raise ValueError(f"solve_floorplan: corridor relief did not converge in channel {channel} of die {die_dims}")
 
-    return Floorplan(num_qubits=num_qubits, box_widths=[width] * num_layers, in_port_columns=in_port_columns, out_port_columns=out_port_columns, lane_columns=[{} for _ in range(num_layers)], moves=[[] for _ in range(num_layers - 1)], gap_levels=gap_levels, side_exits=[{} for _ in range(num_layers)], side_entries=[{} for _ in range(num_layers)], die_dims=die_dims, rows=rows, placements=placements, parked_slots=parked_slots, grid_moves=grid_moves)
+    return Floorplan(num_qubits=num_qubits, box_widths=[width] * num_layers, in_port_columns=in_port_columns, out_port_columns=out_port_columns, lane_columns=[{} for _ in range(num_layers)], moves=[[] for _ in range(num_layers - 1)], gap_levels=gap_levels, die_dims=die_dims, rows=rows, placements=placements, parked_slots=parked_slots, grid_moves=grid_moves)

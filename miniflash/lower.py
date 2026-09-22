@@ -30,8 +30,6 @@ class _Pipe(NamedTuple):
     hadamard: bool = False
     #: magic-state volume
     t_volume: bool = False
-    #: side-face routing
-    side: bool = False
     #: owning injection index, None for plain geometry
     inj: object = None
 
@@ -480,31 +478,6 @@ class _Emitter:
             else:
                 yield from self.j_run(col_a * STRIDE, y_a, y_b, jog_z, hop_bit)
 
-    def side_face_run(self, face_cube, hop_cube, z_port, parity_bit, flip):
-        for i in range(face_cube, hop_cube, STRIDE):
-            first = flip and i == face_cube
-            yield _make_pipe([i, WIRE_J, z_port], [i + STRIDE, WIRE_J, z_port], "I", 0 if first else parity_bit, side=True, hadamard=first)
-
-    def side_exit(self, face_cube, hop_cube, lane_cube, plane_j, z_port, z_bottom, parity_bit):
-        yield from self.side_face_run(face_cube, hop_cube, z_port, parity_bit, False)
-        hop_bit = 1 - parity_bit
-        yield _make_pipe([hop_cube, min(WIRE_J, plane_j), z_port], [hop_cube, max(WIRE_J, plane_j), z_port], "J", hop_bit, side=True)
-        for i in range(hop_cube, lane_cube, STRIDE):
-            yield _make_pipe([i, plane_j, z_port], [i + STRIDE, plane_j, z_port], "I", parity_bit, side=True)
-        yield _make_pipe([lane_cube, min(WIRE_J, plane_j), z_port], [lane_cube, max(WIRE_J, plane_j), z_port], "J", hop_bit, side=True)
-        for z in range(z_port + 1, z_bottom, STRIDE):
-            yield _make_pipe([lane_cube, WIRE_J, z], [lane_cube, WIRE_J, z + STRIDE], "K", parity_bit, side=True)
-
-    def side_entry(self, face_cube, hop_cube, lane_cube, plane_j, z_start, z_port, parity_bit, flip):
-        hop_bit = 1 - parity_bit
-        for z in range(z_start, z_port, STRIDE):
-            yield _make_pipe([lane_cube, WIRE_J, z], [lane_cube, WIRE_J, z + STRIDE], "K", parity_bit, side=True)
-        yield _make_pipe([lane_cube, min(WIRE_J, plane_j), z_port], [lane_cube, max(WIRE_J, plane_j), z_port], "J", hop_bit, side=True)
-        for i in range(hop_cube, lane_cube, STRIDE):
-            yield _make_pipe([i, plane_j, z_port], [i + STRIDE, plane_j, z_port], "I", parity_bit, side=True)
-        yield _make_pipe([hop_cube, min(WIRE_J, plane_j), z_port], [hop_cube, max(WIRE_J, plane_j), z_port], "J", hop_bit, side=True)
-        yield from self.side_face_run(face_cube, hop_cube, z_port, parity_bit, flip)
-
     def pipes(self):
         plan, program = self.plan, self.program
         for layer in range(plan.num_layers):
@@ -533,17 +506,6 @@ class _Emitter:
                 for pipe in self.crossbar(macro, plan.injection_z0[index], bits.get(macro.qubits[0], 0)):
                     yield pipe._replace(inj=index)
 
-            if plan.die_dims is None and program.sides:
-                exit_face_cube = (program.box_widths[channel] - 1) * STRIDE
-                hop_cube = max(program.box_widths) * STRIDE
-                for qubit, (lane_column, slot, plane) in program.sides[channel][0].items():
-                    z_port = plan.z_offsets[channel] + plan.layer_depths[channel] - 2 * slot
-                    yield from self.side_exit(exit_face_cube, hop_cube, lane_column * STRIDE, plane * STRIDE, z_port, z_bottom, 0)
-                entry_face_cube = (program.box_widths[channel + 1] - 1) * STRIDE
-                for qubit, (lane_column, slot, plane) in program.sides[channel + 1][1].items():
-                    z_port = z_bottom + 2 * slot
-                    yield from self.side_entry(entry_face_cube, hop_cube, lane_column * STRIDE, plane * STRIDE, z_bottom, z_port, bits.get(qubit, 0), bits.get(qubit, 0) == 1)
-
         if plan.injections:
             if plan.num_layers > 0 and plan.z_offsets[0] > 0:
                 head = dict(plan.cols(0, "in"))
@@ -561,6 +523,8 @@ class _Emitter:
                     yield from self.straight_run((qubit + 1) * STRIDE, WIRE_J, 0, plan.z_end, 0)
 
             for index, macro in enumerate(plan.injections):
+                if macro.level >= 0:
+                    continue
                 channel = macro.layer
                 qubit = macro.qubits[0]
                 if channel == 0 or plan.num_layers == 0:
@@ -634,20 +598,10 @@ class _LaneEmitter(_Emitter):
 
     def crossbar(self, macro, z0, parity_bit):
         data_cube = macro.offset * STRIDE
-        if self.program.magic_sides == 2:
-            magic_cube = self.program.magic_column * STRIDE if macro.slot == 0 else 0
-        else:
-            magic_cube = (self.program.magic_column + 2 * macro.slot) * STRIDE
         z_zz = z0 + STRIDE
         plane_j = 2 * STRIDE if macro.slot == 0 else 0
-        hop_bit = 1 - parity_bit
-        if self.program.magic_sides != 2:
-            yield _make_pipe([magic_cube, WIRE_J, z0], [magic_cube + STRIDE, WIRE_J, z0], "I", 0, t_volume=True)
-        yield _make_pipe([magic_cube, WIRE_J, z0], [magic_cube, WIRE_J, z_zz], "K", 0, t_volume=True)
-        yield _make_pipe([data_cube, min(WIRE_J, plane_j), z_zz], [data_cube, max(WIRE_J, plane_j), z_zz], "J", hop_bit, t_volume=True)
-        for i in range(min(data_cube, magic_cube), max(data_cube, magic_cube), STRIDE):
-            yield _make_pipe([i, plane_j, z_zz], [i + STRIDE, plane_j, z_zz], "I", parity_bit, t_volume=True)
-        yield _make_pipe([magic_cube, min(WIRE_J, plane_j), z_zz], [magic_cube, max(WIRE_J, plane_j), z_zz], "J", hop_bit, t_volume=True)
+        yield _make_pipe([data_cube, plane_j, z0], [data_cube, plane_j, z_zz], "K", parity_bit, t_volume=True)
+        yield _make_pipe([data_cube, min(WIRE_J, plane_j), z_zz], [data_cube, max(WIRE_J, plane_j), z_zz], "J", parity_bit, t_volume=True)
 
 def _pipes_of(program, plan):
     emitter = _RowEmitter(program, plan) if plan.die_dims is not None else _LaneEmitter(program, plan)
@@ -663,10 +617,7 @@ def _factory_boxes(plan):
         z_zz = plan.injection_z0[index] + STRIDE
         if macro.level >= 0 and plan.die_dims is None:
             wire = _row_base(plan.bases, macro.row) + WIRE_J
-            if plan.program.magic_sides == 2:
-                face = -width if macro.slot == 1 else (plan.program.magic_column + 1) * STRIDE
-            else:
-                face = (plan.program.magic_column + 2 * macro.slot + 1) * STRIDE
+            face = macro.offset * STRIDE
             boxes.append({"lo": [face, wire, z_zz - span], "hi": [face + width, wire + plan.factory.dim_j * STRIDE, z_zz]})
             continue
         face = plan.bank_x

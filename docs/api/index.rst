@@ -18,7 +18,7 @@ below hold the implementations and reference docstrings.
    placement2d
    channel
    synthesis
-   orientation
+   packing
    program
    factory
 

@@ -33,7 +33,8 @@ python main.py benchmarks/algorithms/ghz8.qasm -o ghz8.gltf
 
 Partitioning is coarse-first: regions start at whole-circuit granularity
 and split in place whenever a region exhausts its per-region SAT budget
-(`--sat`, default budget 600 s; the default mode serves cached cells and templates the rest). Compilation starts cold and warms the cell
+(`--engine sat`, budget via `--budget`, default 600 s; the default engine
+serves cached cells and packs the rest without a solver). Compilation starts cold and warms the cell
 cache as it goes; optionally pre-warm it from the published archive
 (`cache-v1` release, sha256-pinned):
 

@@ -50,19 +50,6 @@ class InjectionEvent:
     dagger: bool
 
 
-def injection_events(circuit) -> list:
-    """Extract every ``t``/``tdg`` gate as a magic-state injection event.
-
-    :param circuit: qiskit QuantumCircuit (already parse()d).
-    :returns: list[InjectionEvent] in gate order.
-    """
-    return [InjectionEvent(gate.index, gate.qubits[0], gate.name == "tdg")
-            for gate in extract_gates(circuit) if gate.name in ("t", "tdg")]
-
-
-_ANSI_PALETTE = [31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96]
-
-
 def _ansi(text, region, color):
     if not color or region is None:
         return text
@@ -525,6 +512,58 @@ def partition(circuit: QuantumCircuit, max_qubits=4, max_gates=16) -> list:
         out_pins = {qubit: f"out_{local_index}" for local_index, qubit in enumerate(window.qubits)}
         gate_tuples = [(gate.name, gate.qubits) for gate in window.gates]
         regions.append(Region(qubits=window.qubits, gates=gate_tuples, in_pins=in_pins, out_pins=out_pins, first_gate_index=window.gates[0].index, gate_indices=[gate.index for gate in window.gates]))
+
+    events = [InjectionEvent(gate.index, gate.qubits[0], gate.name == "tdg") for gate in gates if gate.name in ("t", "tdg")]
+    regions = _serialize_regions(regions, events)
+    return PartitionedCircuit(num_qubits=circuit.num_qubits, gates=gates, regions=regions, events=events)
+
+
+def partition_t_layers(circuit: QuantumCircuit) -> PartitionedCircuit:
+    """Cut the Clifford part into the coarsest regions the T cuts allow.
+
+    Every ``t``/``tdg`` interrupts its own qubit's timeline and must fire in a
+    channel between two layers, so the number of layers is bounded below by the
+    busiest qubit's T count. This assigns each Clifford gate the earliest layer
+    consistent with that bound — the layer index is the number of T gates
+    already passed on the gate's own qubits, pushed forward past its
+    predecessors — and hands each layer's connected components over as regions.
+    The greedy window search of :func:`partition` optimizes each window's shape
+    instead and lands several times above the bound, which fragments the cells
+    a slab packer needs whole.
+
+    :param circuit: qiskit QuantumCircuit.
+    :returns: PartitionedCircuit.
+    """
+    gates = extract_gates(circuit)
+    passed = {}
+    layer_of = {}
+    reached = {}
+    for gate in gates:
+        if gate.name not in CLIFFORD_GATES:
+            for qubit in gate.qubits:
+                passed[qubit] = passed.get(qubit, 0) + 1
+            continue
+        layer = max(max(passed.get(qubit, 0), reached.get(qubit, 0)) for qubit in gate.qubits)
+        layer_of[gate.index] = layer
+        for qubit in gate.qubits:
+            reached[qubit] = layer
+
+    by_layer = {}
+    for gate in gates:
+        if gate.index in layer_of:
+            by_layer.setdefault(layer_of[gate.index], []).append(gate)
+
+    regions = []
+    for layer in sorted(by_layer):
+        for component in _split_connected_components(by_layer[layer]):
+            qubits = sorted({qubit for gate in component for qubit in gate.qubits})
+            in_pins = {qubit: f"in_{local}" for local, qubit in enumerate(qubits)}
+            out_pins = {qubit: f"out_{local}" for local, qubit in enumerate(qubits)}
+            regions.append(Region(qubits=qubits, gates=[(gate.name, gate.qubits) for gate in component],
+                                  in_pins=in_pins, out_pins=out_pins,
+                                  first_gate_index=component[0].index,
+                                  gate_indices=[gate.index for gate in component]))
+    regions.sort(key=lambda region: region.first_gate_index)
 
     events = [InjectionEvent(gate.index, gate.qubits[0], gate.name == "tdg") for gate in gates if gate.name in ("t", "tdg")]
     regions = _serialize_regions(regions, events)

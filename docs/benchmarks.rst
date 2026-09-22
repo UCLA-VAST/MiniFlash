@@ -20,24 +20,24 @@ et al., `arXiv:2601.23109 <https://arxiv.org/abs/2601.23109>`_) and
      - 0.20×
    * - Bernstein–Vazirani
      - 8
-     - 0.46×
-     - 0.17×
+     - 0.70×
+     - 0.27×
    * - Deutsch–Jozsa
      - 8
-     - 1.08×
-     - 0.71×
+     - 1.41×
+     - 0.92×
    * - random Clifford
      - 9
-     - 0.78×
-     - 0.87×
+     - 0.73×
+     - 0.81×
    * - graph states
      - 12
-     - 0.74×
-     - 0.88×
+     - 0.63×
+     - 0.75×
    * - **all**
      - **44**
-     - **0.72×**
-     - **0.49×**
+     - **0.77×**
+     - **0.53×**
 
 Four of the five families favor MiniFlash; the driver on both sides is
 **cell granularity**. Wins come from whole-circuit cells that amortize
@@ -48,9 +48,9 @@ exceeds its budget and the circuit splits into stitched fragments.
 
    Volume = tile bounding box, the same unit in all three tools.
    Identical QASM inputs; TopoLS under a 180 s wall (misses "—",
-   bv-100 from its fast profile). MiniFlash runs use ``--sat`` with a
-   warm cell cache and the default 600 s per-region budget.
-   Measured 2026-08.
+   bv-100 from its fast profile). MiniFlash runs use ``--engine sat``
+   with a warm cell cache and the default 600 s per-region budget.
+   Measured 2026-08-25.
 
 GHZ State Preparation
 ---------------------
@@ -143,42 +143,42 @@ Bernstein–Vazirani
      - 0.39×
      - 0.14×
    * - ``bv-40``
-     - 1,890
+     - 3,672
      - 3,402
      - 11,271
-     - 0.56×
-     - 0.17×
+     - 1.08×
+     - 0.33×
    * - ``bv-50``
-     - 3,078
+     - 6,240
      - 5,103
      - 17,689
-     - 0.60×
-     - 0.17×
+     - 1.22×
+     - 0.35×
    * - ``bv-60``
-     - 3,819
+     - 7,425
      - 7,533
      - 21,299
-     - 0.51×
-     - 0.18×
+     - 0.99×
+     - 0.35×
    * - ``bv-80``
-     - 7,644
+     - 17,976
      - —
      - 34,839
      - —
-     - 0.22×
+     - 0.52×
    * - ``bv-100``
-     - 11,526
+     - 29,160
      - 20,196
      - 52,371
-     - 0.57×
-     - 0.22×
+     - 1.44×
+     - 0.56×
 
 Deutsch–Jozsa
 -------------
 
-The one family that loses to TopoLS (1.08×): star connectivity
+The one family that loses to TopoLS (1.41×): star connectivity
 fragments into a serial chain of cells and the stitching depth adds up.
-Against DasCot it wins (0.71×).
+Against DasCot it still wins narrowly (0.92×).
 
 .. list-table::
    :header-rows: 1
@@ -197,17 +197,17 @@ Against DasCot it wins (0.71×).
      - 1.26×
      - 1.08×
    * - ``dj-20``
-     - 882
+     - 966
      - 594
      - 1,089
-     - 1.48×
-     - 0.81×
+     - 1.63×
+     - 0.89×
    * - ``dj-30``
-     - 1,302
+     - 2,244
      - 1,071
      - 1,694
-     - 1.22×
-     - 0.77×
+     - 2.10×
+     - 1.32×
    * - ``dj-40``
      - 2,064
      - 1,890
@@ -215,11 +215,11 @@ Against DasCot it wins (0.71×).
      - 1.09×
      - 0.64×
    * - ``dj-50``
-     - 2,862
+     - 3,888
      - 2,916
      - 4,056
-     - 0.98×
-     - 0.71×
+     - 1.33×
+     - 0.96×
    * - ``dj-60``
      - 3,402
      - 4,464
@@ -227,23 +227,21 @@ Against DasCot it wins (0.71×).
      - 0.76×
      - 0.52×
    * - ``dj-80``
-     - 7,056
+     - 12,528
      - 8,118
      - 11,271
-     - 0.87×
-     - 0.63×
+     - 1.54×
+     - 1.11×
    * - ``dj-100``
-     - 11,340
+     - 20,928
      - 10,098
      - 17,689
-     - 1.12×
-     - 0.64×
+     - 2.07×
+     - 1.18×
 
 Random Clifford
 ---------------
 
-Best configuration per circuit (``--orientation`` / ``--side-ports``
-sweeps).
 
 .. list-table::
    :header-rows: 1
@@ -286,29 +284,29 @@ sweeps).
      - 1.36×
      - 1.51×
    * - ``8q-cx75``
-     - 1,380
+     - 918
      - 810
      - 891
-     - 1.70×
-     - 1.55×
+     - 1.13×
+     - 1.03×
    * - ``16q-cx25``
-     - 1,344
+     - 1,248
      - 891
      - 605
-     - 1.51×
-     - 2.22×
+     - 1.40×
+     - 2.06×
    * - ``16q-cx50``
-     - 6,105
+     - 5,940
      - 1,296
      - 968
-     - 4.71×
-     - 6.31×
+     - 4.58×
+     - 6.14×
    * - ``16q-cx75``
-     - 6,600
+     - 5,940
      - 2,025
      - 1,694
-     - 3.26×
-     - 3.90×
+     - 2.93×
+     - 3.51×
 
 Graph States
 ------------
@@ -342,17 +340,17 @@ Graph States
      - 1.48×
      - 1.84×
    * - ``gs4-complete``
-     - 468
+     - 504
      - 297
      - 245
-     - 1.58×
-     - 1.91×
+     - 1.70×
+     - 2.06×
    * - ``gs8-ring``
-     - 429
+     - 120
      - 360
      - 648
-     - 1.19×
-     - 0.66×
+     - 0.33×
+     - 0.19×
    * - ``gs8-linear``
      - 396
      - 360
@@ -360,11 +358,11 @@ Graph States
      - 1.10×
      - 0.70×
    * - ``gs8-grid2x4``
-     - 507
+     - 546
      - 405
      - 324
-     - 1.25×
-     - 1.56×
+     - 1.35×
+     - 1.69×
    * - ``gs8-rand50``
      - 363
      - 1,215
@@ -384,17 +382,17 @@ Graph States
      - 0.22×
      - 0.56×
    * - ``gs16-linear``
-     - 1,452
+     - 1,254
      - —
      - 1,815
      - —
-     - 0.80×
+     - 0.69×
    * - ``gs16-grid``
-     - 5,586
+     - 3,078
      - 1,620
      - 1,452
-     - 3.45×
-     - 3.85×
+     - 1.90×
+     - 2.12×
 
 Sparse Long-Range Circuits (SynthLR)
 ------------------------------------
@@ -449,44 +447,66 @@ Sparse Long-Range Circuits (SynthLR)
 T-Dense Circuits (Galois-Field Multiplication)
 ----------------------------------------------
 
-Injection-dominated circuits (112–448 T gates): MiniFlash trails
-DasCot, geomean **2.67×** (die mode, ``t-cultivation``,
-gap-riding injections); TopoLS times out on all of them. The residual
-is the per-layer transition toll (channel gap plus injection levels)
-against DasCot's ~1 step per routed operation — see the fixed-column
-work for the path below 1×.
+Injection-dominated circuits (112–448 T gates): the fixed-column mode
+(``--fixed-columns --engine sat --factory external --die W --factories 2``,
+per-size widths 24/32/40/48/56 — interleave-merged joint cells, packed
+injections, distributed magic entry) compares to DasCot two ways.
+**As reported**, DasCot counts every timestep as one unit of time, a
+CNOT included — geomean **1.06×** against that accounting, with
+``gf2e4-mult`` and ``gf2e6-mult`` below parity. But a CNOT cannot
+complete in one merge round: its :math:`M_{ZZ}` and :math:`M_{XX}` are
+anticommuting and must be sequential, so a timestep that routes a CNOT
+physically lasts two rounds while a step holding only T injections (a
+single :math:`M_{ZZ}`) lasts one. **Converted per step** from DasCot's
+own schedules (74–207 of its steps per circuit route a CNOT), the
+geomean is **0.60×** — every size below parity. The solver-free packer
+(``--engine packing --t-layers``, seconds of compile time) matches
+both (1.05× reported, 0.59× converted). TopoLS times out on all of
+them.
 
 .. list-table::
    :header-rows: 1
-   :widths: 22 16 16 16 16
+   :widths: 22 10 14 14 12 14 12
 
    * - circuit
      - T count
      - MiniFlash
-     - DasCot
-     - vs DasCot
+     - DasCot (reported)
+     - vs reported
+     - DasCot (converted)
+     - vs converted
    * - ``gf2e4-mult``
      - 112
-     - 23,400
+     - 11,634
      - 12,463
-     - 1.88×
+     - **0.93×**
+     - 21,417
+     - **0.54×**
    * - ``gf2e5-mult``
      - 175
-     - 43,659
+     - 18,564
      - 16,456
-     - 2.65×
+     - 1.13×
+     - 28,677
+     - **0.65×**
    * - ``gf2e6-mult``
      - 252
-     - 70,971
+     - 27,780
      - 28,899
-     - 2.46×
+     - **0.96×**
+     - 50,869
+     - **0.55×**
    * - ``gf2e7-mult``
      - 343
-     - 105,252
+     - 37,260
      - 34,645
-     - 3.04×
+     - 1.08×
+     - 62,699
+     - **0.59×**
    * - ``gf2e8-mult``
      - 448
-     - 153,558
+     - 51,090
      - 42,081
-     - 3.65×
+     - 1.21×
+     - 77,064
+     - **0.66×**

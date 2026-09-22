@@ -70,13 +70,15 @@ CLI Reference
      - die width constraint (rows grow on demand)
    * - ``--factories``
      - number of factory units (die mode)
-   * - ``--sat [SECONDS]``
-     - SAT-solve uncached regions, per-region budget in seconds
-       (default: cached cells + templates only)
-   * - ``--side-ports``
-     - swap through cell side faces (1-D only)
-   * - ``--orientation``
-     - lay deep cells down (1-D only)
+   * - ``--engine {auto,sat,packing}``
+     - auto (default): cached cells, then the solver-free packer;
+       sat: solver only; packing: packer only, cache never read
+   * - ``--budget SECONDS``
+     - per-region solver budget for ``--engine sat`` (default 600)
+   * - ``--t-layers``
+     - partition by T-aligned layers (the coarse regions the packer wants)
+   * - ``--fixed-columns``
+     - fixed home columns: straight channels, joint cells, canonical cell cache
    * - ``--cache-dir``
      - cell cache directory (default ``.miniflash-cache``)
    * - ``--dump-ir``
@@ -84,8 +86,9 @@ CLI Reference
 
 Partitioning is coarse-first: regions start at whole-circuit
 granularity and split in place whenever a region exhausts its SAT
-budget (``--sat`` mode; the default serves cached cells and templates
-everything else).
+budget (``--engine sat``); ``--t-layers`` instead cuts only where the
+T gates force a channel. The default engine serves cached cells and
+packs everything else without a solver.
 
 Using MiniFlash as a Library
 ----------------------------

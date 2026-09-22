@@ -7,7 +7,7 @@ routing retry-free — the wire never adapts to the cell; the cell adapts
 to the wire.
 
 This module holds the shared move types (:class:`Move`,
-:class:`SideMove`, :class:`GridMove`), the packing helpers, the
+:class:`GridMove`), the packing helpers, the
 :func:`solve_floorplan` dispatcher and injection placement
 (:func:`place_injections`). The concrete solvers live in
 :mod:`miniflash.placement1d` (column-stable 1-D) and
@@ -32,20 +32,6 @@ class Move:
     plane: int
 
 
-@dataclass(frozen=True)
-class SideMove:
-    """A park/unpark move through a cell side face to a lane column."""
-
-    #: qubit being parked or unparked
-    qubit: int
-    #: lane column the qubit waits in
-    lane_column: int
-    #: K slot of the side-face port (sets the port height on the cell wall)
-    slot: int
-    #: J corridor used between the cell face and the lane
-    plane: int
-
-
 @dataclass
 class Floorplan:
     """The symbolic layout contract: every port column, lane, move and track,
@@ -65,14 +51,6 @@ class Floorplan:
     moves: list
     #: per channel, number of jog track levels in the gap
     gap_levels: list = field(default_factory=list)
-    #: per layer, {qubit: SideMove} park moves out through a cell side face
-    side_exits: list = field(default_factory=list)
-    #: per layer, {qubit: SideMove} unpark moves back in through a side face
-    side_entries: list = field(default_factory=list)
-    #: leftmost column of the magic-state lane (1-D), None without injections
-    magic_column: int = None
-    #: 1 = right-side magic lanes; 2 = margin-column lanes on both sides (fixed columns)
-    magic_sides: int = 1
     #: (width, rows | None) die constraint, None for unconstrained 1-D
     die_dims: tuple = None
     #: number of die rows actually used
@@ -133,9 +111,9 @@ def passthrough_floorplan(num_qubits):
     """Build a degenerate Floorplan with no cells — straight wires only (pure-T circuits).
 
     :param num_qubits: int.
-    :returns: Floorplan with zero layers, magic column reserved.
+    :returns: Floorplan with zero layers.
     """
-    return Floorplan(num_qubits=num_qubits, box_widths=[], in_port_columns=[], out_port_columns=[], lane_columns=[], moves=[], gap_levels=[], magic_column=num_qubits + 1)
+    return Floorplan(num_qubits=num_qubits, box_widths=[], in_port_columns=[], out_port_columns=[], lane_columns=[], moves=[], gap_levels=[])
 
 
 def _die_slot(floorplan, layer, qubit, use_out):
@@ -146,26 +124,20 @@ def _die_slot(floorplan, layer, qubit, use_out):
     return floorplan.parked_slots[layer][qubit]
 
 
-def _in_gap_level(floorplan, boundary, column, slot_count, occupied, slot_levels, qubit_floor):
+def _in_gap_level(floorplan, boundary, column, slot_count, occupied, qubit_floor):
     if floorplan.die_dims is not None:
         reach = [floorplan.die_dims[0] - 1] * slot_count
-        spacing = 1
-    elif floorplan.magic_sides == 2:
-        reach = [floorplan.magic_column, 0][:slot_count]
-        spacing = 2
+        riser = 1
     else:
-        reach = [floorplan.magic_column + 2 * slot for slot in range(slot_count)]
-        spacing = 2
+        reach = [column] * slot_count
+        riser = 2
 
-    slot_order = sorted(range(slot_count), key=lambda slot: abs(column - reach[slot]))
     level = qubit_floor
     while True:
-        for slot in slot_order:
+        for slot in range(slot_count):
             plane = 2 if slot == 0 else 0
             low, high = min(column, reach[slot]), max(column, reach[slot])
-            if any(abs(level - used) < spacing for used in slot_levels.get((boundary, slot), ())):
-                continue
-            if any(used_plane == plane and not (high < used_low or used_high < low) for used_level, used_plane, used_low, used_high in occupied.get(boundary, ()) if used_level == level):
+            if any(used_plane == plane and not (high < used_low or used_high < low) for used_level, used_plane, used_low, used_high in occupied.get(boundary, ()) if level <= used_level < level + riser):
                 continue
             return level, slot, (low, high, plane)
         level += 1
@@ -205,7 +177,6 @@ def place_injections(events, channels, floorplan, factory=None, factories=1):
     round_sizes = {}
     round_totals = {}
     occupied = {}
-    slot_levels = {}
     qubit_floor = {}
 
     if floorplan.die_dims is not None:
@@ -233,14 +204,15 @@ def place_injections(events, channels, floorplan, factory=None, factories=1):
             in_gap = fast_factory and floorplan.rows == 1 and 1 <= channel <= num_layers - 1
         else:
             movers = floorplan.moves[boundary] if 0 <= boundary < len(floorplan.moves) else ()
-            in_gap = fast_factory and floorplan.magic_column is not None and 1 <= channel <= num_layers - 1
+            in_gap = fast_factory and 1 <= channel <= num_layers - 1
 
         if in_gap:
             own_jogs = [move.level for move in movers if move.qubit == event.qubit]
             floor = max(qubit_floor.get((boundary, event.qubit), 0), max(own_jogs) + 1 if own_jogs else 0)
-            level, slot, span = _in_gap_level(floorplan, boundary, column, slot_count, occupied, slot_levels, floor)
+            level, slot, span = _in_gap_level(floorplan, boundary, column, slot_count, occupied, floor)
             occupied[boundary].append((level, span[2], span[0], span[1]))
-            slot_levels.setdefault((boundary, slot), []).append(level)
+            if floorplan.die_dims is None:
+                occupied[boundary].append((level + 1, span[2], span[0], span[1]))
             qubit_floor[(boundary, event.qubit)] = level + 1
             floorplan.gap_levels[boundary] = max(floorplan.gap_levels[boundary], level + 1)
             points.append(InjectionPoint(qubit=event.qubit, dagger=event.dagger, channel=channel, column=column, row=row, slot=slot, level=level))
@@ -270,13 +242,11 @@ def _normalize_layers(member_sets):
     return layers
 
 
-def solve_floorplan(member_sets, num_qubits, side_ports=False, with_magic=False, die_dims=None):
+def solve_floorplan(member_sets, num_qubits, die_dims=None):
     """Plan port columns, parking lanes and inter-layer qubit moves for all layers.
 
     :param member_sets: list per layer of a flat qubit list or list of per-box qubit lists.
     :param num_qubits: int.
-    :param side_ports: bool, park/unpark through cell side faces (1-D only).
-    :param with_magic: bool, reserve a magic-state column.
     :param die_dims: (width, rows | None) or None for 1-D.
     :returns: Floorplan.
     :raises ValueError: on empty/duplicate layers or die_dims overflow.
@@ -287,9 +257,7 @@ def solve_floorplan(member_sets, num_qubits, side_ports=False, with_magic=False,
     if die_dims is not None:
         from .placement2d import solve_2d
 
-        if side_ports:
-            raise ValueError("solve_floorplan: side_ports requires single-row (die_dims=None) mode")
-        return solve_2d(layers, num_qubits, die_dims, with_magic)
+        return solve_2d(layers, num_qubits, die_dims)
     from .placement1d import solve_1d
 
-    return solve_1d(layers, num_qubits, side_ports, with_magic)
+    return solve_1d(layers, num_qubits)
