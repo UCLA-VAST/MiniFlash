@@ -7,6 +7,7 @@
 <p align="center"><b>An <i>ultra fast</i> Clifford+T &rarr; lattice-surgery compiler.</b></p>
 
 <p align="center">
+  <a href="https://miniflash.readthedocs.io"><img src="https://readthedocs.org/projects/miniflash/badge/?version=latest" alt="documentation"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2626d9.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-d92626.svg" alt="python 3.9+">
   <img src="https://img.shields.io/badge/pure-Python-26bf40.svg" alt="pure python">
@@ -16,6 +17,7 @@ MiniFlash turns an OpenQASM 2.0 circuit into a **tile program**: which tiles hol
 qubits, magic states and routes, and which tiles merge at each step. It minimizes
 spacetime volume (height × width × steps, walks included), checks every program
 with an independent verifier, and renders it as a glTF scene.
+Read the [full documentation](https://miniflash.readthedocs.io).
 
 ## Quickstart
 
