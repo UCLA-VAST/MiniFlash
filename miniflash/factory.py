@@ -1,37 +1,15 @@
-"""Magic-state factories: charge a finished program for the supply behind its magic tiles.
-
-    from miniflash import Factory, charge
-    bill = charge(program, Factory.parse("3x3x11"))      # 3 x 3 tiles, one state every 11 steps
-    bill.total                                           # program volume + factory volume
-
-A program consumes a magic state whenever a MAGIC vertex carries a pair id (an idle
-magic tile has id -1). The factories that supply those states sit off the chip, so the
-compiler never sees them; this module prices them afterwards. One factory of
-`height x width` tiles yields one state every `period` steps and is kept for the whole
-program, so
-
-    factory_volume = factories x height x width x steps
-    total          = program.volume + factory_volume
-
-How many factories a program needs is the `sizing` of the Factory:
-
-    peak    the most states any single step consumes (one factory per concurrently
-            consumed tile; the right count when delivery is already limited to one
-            state per tile every `period` steps, as with Compiler(magic_cooldown=period))
-    rate    the most states consumed in any window of `period` consecutive steps, which
-            is what `factories` producing one state per `period` steps can sustain; it
-            equals `peak` under the delivery limit and exceeds it without one
-    tiles   every magic tile consumed at least once (the compaction leaves only the
-            tiles the program uses, so this is the supply the layout provides for)
-
-When the compiler was itself given a supply (Compiler(factories=F, period=P)), price
-exactly those: charge(program, Factory(3, 3, P), factories=F).
-"""
+# Magic-state factories: charge a finished program for the supply behind its magic tiles.
+# A program consumes a state whenever a MAGIC vertex carries a pair id. The factories sit off the
+# chip, one of height x width tiles yielding a state every period steps for the whole program, so
+# factory_volume = factories x height x width x steps. The sizing says how many factories a program
+# needs: "peak" is the most states one step consumes, "rate" the most in any window of period steps,
+# "tiles" every magic tile consumed at least once.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import Optional
 
+from . import constant
 from .mapping import Coord
 from .program import IDLE, MAGIC, Program
 
@@ -40,27 +18,21 @@ SIZINGS = ("peak", "rate", "tiles")
 
 @dataclass(frozen=True)
 class Factory:
-    height: int = 3
-    width: int = 3
-    period: int = 11          # steps per magic state
-    sizing: str = "peak"
-
-    def __post_init__(self):
-        if min(self.height, self.width, self.period) < 1:
-            raise ValueError("factory height, width, and period must be positive")
-        if self.sizing not in SIZINGS:
-            raise ValueError(f"sizing must be one of {SIZINGS}, not {self.sizing!r}")
+    height: int = constant.FACTORY_HEIGHT
+    width: int = constant.FACTORY_WIDTH
+    period: int = constant.FACTORY_PERIOD   # steps per magic state
+    sizing: str = constant.FACTORY_SIZING
 
     @property
     def area(self) -> int:
         return self.height * self.width
 
     @classmethod
-    def parse(cls, text: str) -> "Factory":
-        """'HxWxP' or 'HxWxP:sizing', e.g. '3x3x11' or '3x3x11:rate'."""
+    def parse(cls, text: str) -> Factory:
+        # "HxWxP" or "HxWxP:sizing"
         dims, _, sizing = text.partition(":")
-        h, w, p = (int(x) for x in dims.lower().split("x"))
-        return cls(h, w, p, sizing or cls.sizing)
+        height, width, period = (int(part) for part in dims.lower().split("x"))
+        return cls(height, width, period, sizing or cls.sizing)
 
     def __str__(self) -> str:
         return f"{self.height}x{self.width}x{self.period}:{self.sizing}"
@@ -70,8 +42,8 @@ class Factory:
 class Bill:
     factory: Factory
     steps: int
-    consumed: Tuple[int, ...]      # states consumed per step
-    tiles: Set[Coord]              # magic tiles consumed at least once
+    consumed: tuple[int, ...]   # states consumed per step
+    tiles: set[Coord]           # magic tiles consumed at least once
     factories: int
 
     @property
@@ -90,16 +62,10 @@ class Bill:
         return program_volume + self.factory_volume
 
 
-def supply_limits(factory: Optional[Factory], factories: int = 0) -> Tuple[int, int, int]:
-    """(cooldown, factories, period) that the router and the verifier enforce.
-
-    No factory: unlimited supply. A factory alone: one of it behind every magic tile,
-    so a tile yields a state every `factory.period` steps. With `factories` = F > 0:
-    F shared factories feed the whole chip (through the delivery rings of
-    miniflash.supply), F states per `factory.period` steps; the default Factory()
-    when none is given."""
-    if factories < 0:
-        raise ValueError("factories must be non-negative")
+def supply_limits(factory: Optional[Factory], factories: int = 0) -> tuple[int, int, int]:
+    # (cooldown, factories, period) for the router and the verifier. No factory leaves the supply
+    # unlimited; a factory alone puts one behind every magic tile, so a tile yields a state every
+    # period steps; factories = F > 0 shares F of them over the whole chip, F states per period.
     if factories:
         return 1, factories, (factory or Factory()).period
     if factory is None:
@@ -107,17 +73,17 @@ def supply_limits(factory: Optional[Factory], factories: int = 0) -> Tuple[int, 
     return factory.period, 0, factory.period
 
 
-def demand(program: Program) -> Tuple[List[int], Set[Coord]]:
-    """States consumed per step, and the magic tiles consumed at least once."""
-    consumed, tiles = [], set()
+def demand(program: Program) -> tuple[list[int], set[Coord]]:
+    consumed = []
+    tiles = set()
     for step in program.steps:
-        used = [v.tile for v in step.of_kind(MAGIC) if v.id != IDLE]
+        used = [vertex.tile for vertex in step.of_kind(MAGIC) if vertex.id != IDLE]
         consumed.append(len(used))
         tiles.update(used)
     return consumed, tiles
 
 
-def count(consumed: List[int], tiles: Set[Coord], factory: Factory) -> int:
+def count(consumed: list[int], tiles: set[Coord], factory: Factory) -> int:
     if factory.sizing == "tiles":
         return len(tiles)
     if factory.sizing == "peak":
@@ -127,8 +93,7 @@ def count(consumed: List[int], tiles: Set[Coord], factory: Factory) -> int:
 
 
 def charge(program: Program, factory: Factory = Factory(), factories: Optional[int] = None) -> Bill:
-    """Price the program; `factories` overrides the sizing with a fixed count, e.g. the
-    number the compiler was given (Compiler(factories=...))."""
+    # A given factory count overrides the sizing, for pricing the supply the compiler was given.
     consumed, tiles = demand(program)
     return Bill(factory, len(program.steps), tuple(consumed), tiles,
                 factories if factories is not None else count(consumed, tiles, factory))

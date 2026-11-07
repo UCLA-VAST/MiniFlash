@@ -1,62 +1,38 @@
-"""Placement: where each qubit sits on the array.
-
-`place(problem, shape)` puts qubits in index order on DasCot's sparse square (the
-reference point). `place(problem, shape, spectral=True)` is "+ Placement":
-a placed order on the paired-lane array instead of index order.
-
-The virtual map is seeded from the interaction graph, spectrally by default: the
-Fiedler vector of its Laplacian groups qubits into site rows; the next mode orders
-each row, so qubits that interact often land near each other. `init` picks another
-seed instead (random, gordian, gordian-l, mincut, aplace, mpl; see `initial`). A short simulated anneal then
-swaps qubits between sites (empty sites included) to lower a routing proxy summed
-over the ASAP layers of the DAG:
-
-    COLL * (overlaps detected by the layer scan)
-  + LANE * (rows and columns beyond the site rows and columns those routes load)
-  + LEN  * (total tentative route length)
-
-A tentative route runs from the lane-row tile on the Z party's Z side along that
-lane row, then along the lane column beside the X party to its X side (an L), or
-along the lane row to the nearest row-end magic tile, ignoring other routes. Every
-qubit faces the same way, so the Z side is always a lane row and the X side a lane
-column. Only the layers touching the
-two swapped qubits are re-scored, so a proposal costs work proportional to their
-degree. The array is the paired-lane one (Mapping.paired): every two site rows share
-a lane and every two site columns share a lane, magic at the row ends. The later
-stages read the placed order through the returned `Layout`.
-"""
+# Placement: where each qubit sits on the array. Index order on the sparse square is the reference point;
+# otherwise a seed from the interaction graph, spectral by default or one of initial.ORDERS, is annealed by
+# swapping qubits between sites, empty ones included, to lower a routing proxy summed over the ASAP layers of
+# the DAG. The proxy sums the weighted collisions the layer scan detects, the rows and columns loaded beyond
+# the site lines, and the tentative route tiles. A tentative route runs from the lane-row tile on the Z party's
+# Z side along that row to the lane column beside the X party as an L, or along the row to the nearest row-end
+# magic tile, ignoring other routes, and only the layers touching the two swapped qubits are re-scored. The
+# array is the paired-lane one, and the later stages read the placed order through the returned Layout.
 from __future__ import annotations
 
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Optional
 
 import numpy as np
 
+from .. import constant
 from ..circuit import Problem
 from ..mapping import Coord, Layout, Mapping
 from . import initial
 
-COLL, LANE, LEN = 6.0, 6.0, 0.25
 
-
+# Distinct placement layers with their execution counts, so repeated cells weight the layer cost without expansion.
 @dataclass(frozen=True)
 class Workload:
-    """Distinct placement layers and their execution counts, e.g. reusable cells.
-
-    This preserves interaction frequencies and weights the layer cost without
-    expanding repeated calls. Cell-local layers do not model cross-call overlap.
-    """
     problem: Problem
-    layers: List[List[int]]
-    frequencies: List[int]
+    layers: list[list[int]]
+    frequencies: list[int]
 
-    def interaction(self) -> Dict[Tuple[int, int], int]:
-        edges: Dict[Tuple[int, int], int] = {}
+    def interaction(self) -> dict[tuple[int, int], int]:
+        edges: dict[tuple[int, int], int] = {}
         for layer, count in zip(self.layers, self.frequencies):
-            for i in layer:
-                pair = self.problem.pairs[i]
+            for pair_id in layer:
+                pair = self.problem.pairs[pair_id]
                 if not pair.is_magic:
                     edge = tuple(sorted(pair.qubits))
                     edges[edge] = edges.get(edge, 0) + count
@@ -67,180 +43,183 @@ INITS = ("spectral", "random", "gordian", "gordian-l", "mincut", "aplace", "mpl"
 
 
 def interaction_matrix(problem: Problem, workload: Optional[Workload] = None) -> np.ndarray:
-    """CX counts between qubit pairs plus 1e-3 between every pair, which connects
-    otherwise disconnected components. Every initial placement reads this graph."""
-    n = problem.n_qubits
-    adjacency = np.full((n, n), 1e-3)
+    # CX counts plus a floor between every pair, so the graph every initial placement reads is connected.
+    n_qubits = problem.n_qubits
+    adjacency = np.full((n_qubits, n_qubits), constant.INTERACTION_FLOOR)
     np.fill_diagonal(adjacency, 0.0)
-    for (a, b), w in (workload.interaction() if workload is not None else problem.interaction()).items():
-        adjacency[a, b] += w
-        adjacency[b, a] += w
+    edges = workload.interaction() if workload is not None else problem.interaction()
+    for (qubit_a, qubit_b), weight in edges.items():
+        adjacency[qubit_a, qubit_b] += weight
+        adjacency[qubit_b, qubit_a] += weight
     return adjacency
 
 
 def initial_order(init: str, problem: Problem, site_rows: int, site_cols: int,
-                  workload: Optional[Workload] = None, seed: int = 0) -> Dict[int, Tuple[int, int]]:
-    """Qubit -> virtual site from the named initial placement (one of INITS)."""
+                  workload: Optional[Workload] = None, seed: int = constant.PLACEMENT_SEED) -> dict[int, tuple[int, int]]:
     if init == "spectral":
         return spectral_order(problem, site_rows, site_cols, workload)
-    if init not in initial.ORDERS:
-        raise ValueError(f"unknown initial placement {init!r}; choose from {', '.join(INITS)}")
     return initial.ORDERS[init](interaction_matrix(problem, workload), site_rows, site_cols, seed)
 
 
 def spectral_order(problem: Problem, site_rows: int, site_cols: int,
-                   workload: Optional[Workload] = None) -> Dict[int, Tuple[int, int]]:
-    """Qubit -> virtual site on a site_rows x site_cols array from the Laplacian's two
-    smallest nontrivial modes: the Fiedler vector ranks rows, the next mode columns."""
-    n = problem.n_qubits
+                   workload: Optional[Workload] = None) -> dict[int, tuple[int, int]]:
+    # The Fiedler vector of the Laplacian ranks rows and the next mode orders each row.
+    n_qubits = problem.n_qubits
     adjacency = interaction_matrix(problem, workload)
     laplacian = np.diag(adjacency.sum(1)) - adjacency
     _vals, vecs = np.linalg.eigh(laplacian)
-    row_scores = vecs[:, 1] if n > 1 else np.zeros(n)
-    col_scores = vecs[:, 2] if n > 2 else np.zeros(n)
-    by_row = sorted(range(n), key=lambda q: (row_scores[q], q))
+    row_scores = vecs[:, 1] if n_qubits > 1 else np.zeros(n_qubits)
+    col_scores = vecs[:, 2] if n_qubits > 2 else np.zeros(n_qubits)
+
+    by_row = sorted(range(n_qubits), key=lambda qubit: (row_scores[qubit], qubit))
     order = {}
-    for i in range(site_rows):
-        chunk = sorted(by_row[i * site_cols:(i + 1) * site_cols], key=lambda q: (col_scores[q], q))
-        for j, q in enumerate(chunk):
-            order[q] = (i, j)
+    for row in range(site_rows):
+        chunk = sorted(by_row[row * site_cols:(row + 1) * site_cols], key=lambda qubit: (col_scores[qubit], qubit))
+        for col, qubit in enumerate(chunk):
+            order[qubit] = (row, col)
     return order
 
 
+# The layered routing proxy, re-scored per move on the touched layers only.
 class _Proxy:
-    """Layered routing proxy with delta re-scoring per move."""
-
-    def __init__(self, problem: Problem, mapping: Mapping, weights=(COLL, LANE, LEN),
+    def __init__(self, problem: Problem, mapping: Mapping,
+                 weights: tuple[float, float, float] = (constant.ANNEAL_COLLISION_WEIGHT, constant.ANNEAL_LANE_WEIGHT,
+                                                        constant.ANNEAL_LENGTH_WEIGHT),
                  workload: Optional[Workload] = None):
         self.problem = workload.problem if workload is not None else problem
         self.mapping = mapping
-        self.w_coll, self.w_lane, self.w_len = weights
+        self.collision_weight, self.lane_weight, self.length_weight = weights
         self.tiles = dict(mapping.qubits)
-        self.site_rows = {t[0] for t in mapping.qubits.values()}
-        self.site_cols = {t[1] for t in mapping.qubits.values()}
+        self.site_rows = {tile[0] for tile in mapping.qubits.values()}
+        self.site_cols = {tile[1] for tile in mapping.qubits.values()}
         self.magic = sorted(mapping.magic)
-        self.side_magic = [t for t in self.magic if t[1] in (0, mapping.width - 1)]
-        self.lane_rows = {r for r in range(mapping.height) if r not in self.site_rows}
-        self.lane_cols = {c for c in range(mapping.width) if c not in self.site_cols}
+        self.side_magic = [tile for tile in self.magic if tile[1] in (0, mapping.width - 1)]
+        self.lane_rows = {row for row in range(mapping.height) if row not in self.site_rows}
+        self.lane_cols = {col for col in range(mapping.width) if col not in self.site_cols}
         self.layers = workload.layers if workload is not None else problem.layers()
         self.frequencies = workload.frequencies if workload is not None else [1] * len(self.layers)
-        self.of_qubit: Dict[int, List[int]] = {q: [] for q in problem.qubits}
-        for li, layer in enumerate(self.layers):
+
+        self.of_qubit: dict[int, list[int]] = {qubit: [] for qubit in problem.qubits}
+        for layer_index, layer in enumerate(self.layers):
             seen = set()
-            for i in layer:
-                for q in self.problem.pairs[i].qubits:
-                    if q not in seen:
-                        self.of_qubit[q].append(li)
-                        seen.add(q)
-        # A pair's tentative route depends only on its parties' tiles, so it
-        # is cached on that state: a proposal re-derives the routes of the moved qubits' pairs
-        # and reuses every other route in the touched layers.
-        self._routes: Dict[int, Dict[tuple, Tuple[List[Coord], Set[int], Set[int]]]] = {}
-        self._magic_near: Dict[Coord, Coord] = {}
-        self.layer_cost = [self.score(li) for li in range(len(self.layers))]
+            for pair_id in layer:
+                for qubit in self.problem.pairs[pair_id].qubits:
+                    if qubit not in seen:
+                        self.of_qubit[qubit].append(layer_index)
+                        seen.add(qubit)
+
+        # A tentative route depends only on its parties' tiles, so it is cached on them and a proposal
+        # re-derives only the moved qubits' routes.
+        self._routes: dict[int, dict[tuple, tuple[list[Coord], set[int], set[int]]]] = {}
+        self._magic_near: dict[Coord, Coord] = {}
+        self.layer_cost = [self.score(layer_index) for layer_index in range(len(self.layers))]
         self.total = sum(self.layer_cost)
 
-    def side_tile(self, q: int, z: bool) -> Coord:
-        """The lane-row tile on qubit q's Z side (z=True) or the lane-column tile on its X side."""
-        r, c = self.tiles[q]
-        if z:
-            return (r - 1, c) if r - 1 in self.lane_rows else (r + 1, c)
-        return (r, c - 1) if c - 1 in self.lane_cols else (r, c + 1)
+    def side_tile(self, qubit: int, z_side: bool) -> Coord:
+        # The lane-row tile on the Z side, or the lane-column tile on the X side.
+        row, col = self.tiles[qubit]
+        if z_side:
+            return (row - 1, col) if row - 1 in self.lane_rows else (row + 1, col)
+        return (row, col - 1) if col - 1 in self.lane_cols else (row, col + 1)
 
     @staticmethod
-    def _chain(points: List[Coord]) -> List[Coord]:
-        out = [points[0]]
-        for a, b in zip(points, points[1:]):
-            if a[0] == b[0]:
-                step = 1 if b[1] >= a[1] else -1
-                out.extend((a[0], c) for c in range(a[1] + step, b[1] + step, step))
+    def _chain(points: list[Coord]) -> list[Coord]:
+        tiles = [points[0]]
+        for start, end in zip(points, points[1:]):
+            if start[0] == end[0]:
+                sign = 1 if end[1] >= start[1] else -1
+                tiles.extend((start[0], col) for col in range(start[1] + sign, end[1] + sign, sign))
             else:
-                step = 1 if b[0] >= a[0] else -1
-                out.extend((r, a[1]) for r in range(a[0] + step, b[0] + step, step))
-        return out
+                sign = 1 if end[0] >= start[0] else -1
+                tiles.extend((row, start[1]) for row in range(start[0] + sign, end[0] + sign, sign))
+        return tiles
 
-    def route_tiles(self, i: int) -> Tuple[List[Coord], Set[int], Set[int]]:
-        """Tentative route, occupancy ignored (see module docstring); cached on the parties' state."""
-        pair = self.problem.pairs[i]
+    def route_tiles(self, pair_id: int) -> tuple[list[Coord], set[int], set[int]]:
+        pair = self.problem.pairs[pair_id]
         if pair.is_magic:
             key = (self.tiles[pair.z],)
         else:
             key = (self.tiles[pair.z], self.tiles[pair.x])
-        recent = self._routes.get(i)
+
+        recent = self._routes.get(pair_id)
         if recent is None:
-            recent = self._routes[i] = {}
+            recent = self._routes[pair_id] = {}
         result = recent.get(key)
         if result is None:
-            if len(recent) >= 4:          # a rejected proposal restores an earlier state: keep a few
+            if len(recent) >= constant.ROUTE_CACHE_PER_PAIR:   # a rejected proposal restores an earlier state
                 recent.pop(next(iter(recent)))
-            result = recent[key] = self._route_tiles(i)
+            result = recent[key] = self._route_tiles(pair_id)
         return result
 
-    def _route_tiles(self, i: int) -> Tuple[List[Coord], Set[int], Set[int]]:
-        pair = self.problem.pairs[i]
-        start = self.side_tile(pair.z, z=True)           # on a lane row
+    def _route_tiles(self, pair_id: int) -> tuple[list[Coord], set[int], set[int]]:
+        pair = self.problem.pairs[pair_id]
+        start = self.side_tile(pair.z, z_side=True)   # on a lane row
         magic = None
         if pair.is_magic:
-            rq, cq = self.tiles[pair.z]
-            magic = self._magic_near.get((rq, cq))
+            qubit_row, qubit_col = self.tiles[pair.z]
+            magic = self._magic_near.get((qubit_row, qubit_col))
             if magic is None:
                 pool = self.side_magic or self.magic
-                magic = self._magic_near[(rq, cq)] = min(pool, key=lambda t: (abs(t[0] - rq) + abs(t[1] - cq), t))
-            points = [start, (start[0], magic[1])]      # along the lane row to the tile beside the magic tile
+                magic = self._magic_near[(qubit_row, qubit_col)] = min(
+                    pool, key=lambda tile: (abs(tile[0] - qubit_row) + abs(tile[1] - qubit_col), tile))
+            points = [start, (start[0], magic[1])]   # along the lane row to the tile beside the magic tile
         else:
-            end = self.side_tile(pair.x, z=False)        # on a lane column
-            points = [start, (start[0], end[1]), end]    # row then column: the L
+            end = self.side_tile(pair.x, z_side=False)   # on a lane column
+            points = [start, (start[0], end[1]), end]   # row then column, the L
+
         tiles = self._chain(points)
-        rows = {t[0] for t in points}
-        cols = {t[1] for t in points}
+        rows = {point[0] for point in points}
+        cols = {point[1] for point in points}
         if magic is not None:
             rows.add(magic[0])
             cols.add(magic[1])
         return tiles, rows, cols
 
-    def score(self, li: int) -> float:
-        # Each tile remembers its most recent route. A route counts each previous
-        # owner it encounters once; this is a proxy, not an all-pairs conflict count.
-        seen: Dict[Coord, int] = {}
-        coll = 0
-        rows: Set[int] = set()
-        cols: Set[int] = set()
+    def score(self, layer_index: int) -> float:
+        # Each tile remembers its latest route and a route counts every earlier owner it meets once, a proxy
+        # rather than an all-pairs conflict count.
+        seen: dict[Coord, int] = {}
+        collisions = 0
+        rows: set[int] = set()
+        cols: set[int] = set()
         length = 0
-        for i in self.layers[li]:
-            tiles, r, c = self.route_tiles(i)
+        for pair_id in self.layers[layer_index]:
+            tiles, route_rows, route_cols = self.route_tiles(pair_id)
             length += len(tiles)
-            rows |= r
-            cols |= c
-            hit = set()
-            for t in tiles:
-                if t in seen:
-                    hit.add(seen[t])
-                seen[t] = i
-            coll += len(hit)
+            rows |= route_rows
+            cols |= route_cols
+            earlier = set()
+            for tile in tiles:
+                if tile in seen:
+                    earlier.add(seen[tile])
+                seen[tile] = pair_id
+            collisions += len(earlier)
+
         lanes = len(rows - self.site_rows) + len(cols - self.site_cols)
-        return self.frequencies[li] * (self.w_coll * coll + self.w_lane * lanes + self.w_len * length)
+        return self.frequencies[layer_index] * (self.collision_weight * collisions + self.lane_weight * lanes + self.length_weight * length)
 
-    def swap_delta(self, a: int, b: Optional[int], site_b: Coord) -> Tuple[float, List[int], Dict[int, float]]:
-        """Cost change if qubit a moves to site_b and qubit b (if any) to a's site."""
-        touched = sorted(set(self.of_qubit[a]) | (set(self.of_qubit[b]) if b is not None else set()))
-        site_a = self.tiles[a]
-        self.tiles[a] = site_b
-        if b is not None:
-            self.tiles[b] = site_a
-        new = {li: self.score(li) for li in touched}
-        self.tiles[a] = site_a
-        if b is not None:
-            self.tiles[b] = site_b
-        return sum(new[li] - self.layer_cost[li] for li in touched), touched, new
+    def swap_delta(self, qubit_a: int, qubit_b: Optional[int],
+                   site_b: Coord) -> tuple[float, list[int], dict[int, float]]:
+        # The cost change if qubit_a moves to site_b and qubit_b, when there is one, to qubit_a's site.
+        touched = sorted(set(self.of_qubit[qubit_a]) | (set(self.of_qubit[qubit_b]) if qubit_b is not None else set()))
+        site_a = self.tiles[qubit_a]
+        self.tiles[qubit_a] = site_b
+        if qubit_b is not None:
+            self.tiles[qubit_b] = site_a
+        new_cost = {layer_index: self.score(layer_index) for layer_index in touched}
+        self.tiles[qubit_a] = site_a
+        if qubit_b is not None:
+            self.tiles[qubit_b] = site_b
+        return sum(new_cost[layer_index] - self.layer_cost[layer_index] for layer_index in touched), touched, new_cost
 
-    def apply(self, a: int, b: Optional[int], site_b: Coord, new: Dict[int, float]):
-        site_a = self.tiles[a]
-        self.tiles[a] = site_b
-        if b is not None:
-            self.tiles[b] = site_a
-        for li, v in new.items():
-            self.total += v - self.layer_cost[li]
-            self.layer_cost[li] = v
+    def apply(self, qubit_a: int, qubit_b: Optional[int], site_b: Coord, new_cost: dict[int, float]) -> None:
+        site_a = self.tiles[qubit_a]
+        self.tiles[qubit_a] = site_b
+        if qubit_b is not None:
+            self.tiles[qubit_b] = site_a
+        for layer_index, cost in new_cost.items():
+            self.total += cost - self.layer_cost[layer_index]
+            self.layer_cost[layer_index] = cost
 
 
 @dataclass(frozen=True)
@@ -251,56 +230,56 @@ class Placement:
     final_cost: float
 
 
-def square_shape(n_qubits: int, shape: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
-    """(site_rows, site_cols): the given shape, or the smallest square."""
+def square_shape(n_qubits: int, shape: Optional[tuple[int, int]] = None) -> tuple[int, int]:
     return shape if shape is not None else (math.ceil(math.sqrt(n_qubits)),) * 2
 
 
-def place(problem: Problem, shape: Optional[Tuple[int, int]] = None, spectral: bool = False, seed: int = 0,
-          iters: Optional[int] = None, anneal: bool = True,
-          weights: Tuple[float, float, float] = (COLL, LANE, LEN), workload: Optional[Workload] = None,
-          init: str = "spectral") -> Placement:
-    """Index order on the sparse square, or (`spectral`) a seed and anneal on the
-    paired-lane array, of the given shape (the smallest square by default). `init`
-    names the seed (INITS, spectral by default); `iters` defaults to 100 proposals per
-    qubit. `workload` optionally replaces the flat layers with weighted distinct
-    layers for seeding and annealing."""
-    n = problem.n_qubits
-    site_rows, site_cols = square_shape(n, shape)
+def place(problem: Problem, shape: Optional[tuple[int, int]] = None, spectral: bool = False,
+          seed: int = constant.PLACEMENT_SEED, iters: Optional[int] = None, anneal: bool = True,
+          weights: tuple[float, float, float] = (constant.ANNEAL_COLLISION_WEIGHT, constant.ANNEAL_LANE_WEIGHT,
+                                                 constant.ANNEAL_LENGTH_WEIGHT),
+          workload: Optional[Workload] = None, init: str = constant.INITIAL_PLACEMENT) -> Placement:
+    # Without spectral the qubits sit in index order on the sparse square and nothing is annealed.
+    n_qubits = problem.n_qubits
+    site_rows, site_cols = square_shape(n_qubits, shape)
     if not spectral:
-        return Placement(Mapping.sparse(site_rows, site_cols, n), Layout.identity(n, (site_rows, site_cols)), 0.0, 0.0)
+        return Placement(Mapping.sparse(site_rows, site_cols, n_qubits),
+                         Layout.identity(n_qubits, (site_rows, site_cols)), 0.0, 0.0)
+
     order = initial_order(init, problem, site_rows, site_cols, workload, seed)
-    base = Mapping.paired(site_rows, site_cols, n)
-    full = Mapping.paired(site_rows, site_cols, site_rows * site_cols)      # every site filled, to read the geometry
-    row_pos = sorted({t[0] for t in full.qubits.values()})
-    col_pos = sorted({t[1] for t in full.qubits.values()})
-    site_of = {(i, j): (row_pos[i], col_pos[j]) for i in range(site_rows) for j in range(site_cols)}
-    mapping = Mapping(base.height, base.width, {q: site_of[s] for q, s in order.items()}, base.magic)
+    base = Mapping.paired(site_rows, site_cols, n_qubits)
+    full = Mapping.paired(site_rows, site_cols, site_rows * site_cols)   # every site filled, to read the geometry
+    row_pos = sorted({tile[0] for tile in full.qubits.values()})
+    col_pos = sorted({tile[1] for tile in full.qubits.values()})
+    site_of = {(row, col): (row_pos[row], col_pos[col]) for row in range(site_rows) for col in range(site_cols)}
+    mapping = Mapping(base.height, base.width, {qubit: site_of[site] for qubit, site in order.items()}, base.magic)
     proxy = _Proxy(problem, mapping, weights, workload)
     initial_cost = proxy.total
-    if anneal and n > 1:
+
+    if anneal and n_qubits > 1:
         rng = random.Random(seed)
-        iters = iters if iters is not None else 100 * n
+        iters = iters if iters is not None else constant.ANNEAL_PROPOSALS_PER_QUBIT * n_qubits
         sites = list(site_of.values())
-        occupant = {t: q for q, t in proxy.tiles.items()}
-        t0, t1 = max(1.0, 0.05 * proxy.total / max(1, sum(proxy.frequencies))), 0.05
-        for it in range(iters):
-            temp = t0 * (t1 / t0) ** (it / max(1, iters - 1))
-            a = rng.randrange(n)
+        occupant = {tile: qubit for qubit, tile in proxy.tiles.items()}
+        start_temp = max(1.0, constant.ANNEAL_START_TEMPERATURE * proxy.total / max(1, sum(proxy.frequencies)))
+        end_temp = constant.ANNEAL_END_TEMPERATURE
+        for iteration in range(iters):
+            temperature = start_temp * (end_temp / start_temp) ** (iteration / max(1, iters - 1))
+            qubit_a = rng.randrange(n_qubits)
             site_b = sites[rng.randrange(len(sites))]
-            if site_b == proxy.tiles[a]:
+            if site_b == proxy.tiles[qubit_a]:
                 continue
-            b = occupant.get(site_b)
-            delta, touched, new = proxy.swap_delta(a, b, site_b)
-            if delta <= 0 or rng.random() < math.exp(-delta / temp):
-                site_a = proxy.tiles[a]
-                proxy.apply(a, b, site_b, new)
-                occupant[site_b] = a
-                if b is not None:
-                    occupant[site_a] = b
+            qubit_b = occupant.get(site_b)
+            delta, touched, new_cost = proxy.swap_delta(qubit_a, qubit_b, site_b)
+            if delta <= 0 or rng.random() < math.exp(-delta / temperature):
+                site_a = proxy.tiles[qubit_a]
+                proxy.apply(qubit_a, qubit_b, site_b, new_cost)
+                occupant[site_b] = qubit_a
+                if qubit_b is not None:
+                    occupant[site_a] = qubit_b
                 else:
                     del occupant[site_a]
-    inv = {t: s for s, t in site_of.items()}
-    layout = Layout(site_rows, site_cols, {q: inv[t] for q, t in proxy.tiles.items()})
-    return Placement(Mapping(base.height, base.width, dict(proxy.tiles), base.magic),
-                     layout, initial_cost, proxy.total)
+
+    site_at = {tile: site for site, tile in site_of.items()}
+    layout = Layout(site_rows, site_cols, {qubit: site_at[tile] for qubit, tile in proxy.tiles.items()})
+    return Placement(Mapping(base.height, base.width, dict(proxy.tiles), base.magic), layout, initial_cost, proxy.total)

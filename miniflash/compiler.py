@@ -1,106 +1,85 @@
-"""Compiler: one class, configured by a ladder of components added one at a time.
-
-    Compiler(dependency=False)                   # vanilla: one pair per step
-    Compiler()                                   # + dependency-aware scheduling
-    Compiler(routing=True)                       # + criticality-driven routing on the fixed grid
-    Compiler(routing=True, spacing=True)         # + on-demand spacing: partitions, compaction, walks
-    Compiler(..., placement=True)                # + spectral placement and annealing on the paired-lane array
-    Compiler(..., placement=True, init="gordian")  # the same anneal from another initial placement
-    Compiler(..., layout="stats")                # + layout selection: the shape predicted from the DAG
-    Compiler(..., layout=3)                      # or compare the three smallest-area shapes
-
-Every configuration runs the same three passes, each a function in miniflash/synthesis:
-`placement.place` (index order or placed), `schedule.schedule` or `routing.route`
-(the schedule, and for the router the partition windows), and `spacing.space` (a
-plain program, one compaction, or partitions with walks). `layout` repeats them per
-candidate shape (`layout.candidate_shapes`, `layout.stats_shape`) and keeps the
-lowest final volume. The passes are timed into `profile`, one entry per tried
-shape, for the saved-program analyses.
-
-Two development controls fall outside the ladder: `spacing="whole"`
-compacts the whole schedule once without partitions or walks, and `spacing=True`
-without `routing` cuts a finished ASAP schedule by budget.
-"""
+# The compiler: one class configured by a ladder of components added one at a time, vanilla,
+# dependency, routing, spacing, placement and layout. Every configuration runs the same three
+# passes from miniflash.synthesis: place, then schedule or route, then space. Layout selection
+# repeats them per candidate shape and keeps the lowest final volume. The passes are timed into
+# `profile`, one entry per tried shape. Two controls fall outside the ladder: spacing="whole"
+# compacts the whole schedule once, and spacing=True without routing cuts a finished schedule by budget.
 from __future__ import annotations
 
 import functools
 import time
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
-from .synthesis import routing
+from . import constant
 from .circuit import Problem
+from .factory import Factory, supply_limits
 from .hierarchy import Hierarchy
 from .mapping import Layout, Mapping
-from .synthesis import hierarchical
-from .synthesis.layout import Shape, candidate_shapes, stats_shape
-from .synthesis.placement import COLL, INITS, LANE, LEN, Placement, Workload, place
-from .factory import Factory, supply_limits
 from .program import Program
 from .route import Schedule
+from .synthesis import hierarchical, routing
+from .synthesis.layout import Shape, candidate_shapes, stats_shape
+from .synthesis.placement import Placement, Workload, place
 from .synthesis.schedule import schedule
 from .synthesis.spacing import Partition, budgets, cut, space
 
 LADDER = ("vanilla", "dependency", "routing", "spacing", "placement", "layout")
-DEFAULTS = dict(extra=6, share=4.0, seed=0, init="spectral")
+WEIGHTS = (constant.ANNEAL_COLLISION_WEIGHT, constant.ANNEAL_LANE_WEIGHT, constant.ANNEAL_LENGTH_WEIGHT)
 
 
 class Compiler:
     def __init__(self, dependency: bool = True, routing: bool = False, spacing: Union[bool, str] = False,
                  placement: Union[bool, Placement] = False, layout: Union[None, str, int] = None,
-                 shape: Optional[Shape] = None,
-                 extra: int = 6, share: float = 4.0, row_budget: Optional[int] = None, col_budget: Optional[int] = None,
-                 exact: int = 12, factory: Optional[Factory] = None, factories: int = 0,
-                 seed: int = 0, iters: Optional[int] = None, anneal: bool = True,
-                 weights: Tuple[float, float, float] = (COLL, LANE, LEN), init: str = "spectral"):
-        """dependency  False: one pair per step. True: ASAP scheduling. Ignored once `routing` is on.
-        routing     the criticality-driven router with lane scoring; without `spacing` its budget
-                    is the whole grid, so the fixed array is kept and no walks appear.
-        spacing     True: partition by budget, compact each partition, walk between (on-demand
-                    spacing; with `routing` the router closes the partitions, without it
-                    the finished schedule is cut). "whole": compact the whole program once.
-        placement   True: spectral placement and annealing on the paired-lane array. A `Placement`
-                    fixes the mapping and layout instead. False: index order on the sparse square.
-        layout      None: the array of `shape` (the smallest square by default). "stats": the one
-                    shape predicted from the DAG. An int: compare that many smallest-area shapes.
-        factory     None: unlimited magic supply. A Factory(H, W, T) alone: one behind every magic
-                    tile, each tile yielding a state every T steps.
-        factories   F > 0: F shared factories (the default Factory() if none is given) feed the
-                    whole chip from step 0, F states per T steps (see factory.supply_limits).
-        extra, share, row_budget, col_budget, exact configure the budgets and the router;
-        seed, iters, anneal, weights, init configure placement; `init` names the initial
-                    placement the anneal starts from (placement.INITS, spectral by default)."""
-        if spacing not in (False, True, "whole"):
-            raise ValueError(f"spacing must be False, True, or 'whole', not {spacing!r}")
-        if layout is not None and not (isinstance(layout, int) or layout == "stats"):
-            raise ValueError(f"layout must be None, 'stats', or a count, not {layout!r}")
-        if isinstance(placement, Placement) and layout is not None:
-            raise ValueError("a fixed placement has one shape; layout selection needs placement=True")
-        if init not in INITS:
-            raise ValueError(f"init must be one of {', '.join(INITS)}, not {init!r}")
-        supply_limits(factory, factories)   # validates
-        self.dependency, self.routing, self.spacing, self.placement, self.layout_mode = dependency, routing, spacing, placement, layout
+                 shape: Optional[Shape] = None, extra: int = constant.SPACING_EXTRA_LANES,
+                 share: float = constant.ROUTING_SHARE_PENALTY, row_budget: Optional[int] = None,
+                 col_budget: Optional[int] = None, exact: int = constant.ROUTING_EXACT_FRONTIER,
+                 factory: Optional[Factory] = None, factories: int = 0, seed: int = constant.PLACEMENT_SEED,
+                 iters: Optional[int] = None, anneal: bool = True, weights: tuple[float, float, float] = WEIGHTS,
+                 init: str = constant.INITIAL_PLACEMENT):
+        # dependency False schedules one pair per step, True ASAP; routing replaces both with the
+        # criticality-driven router. spacing True partitions by budget and walks between partitions,
+        # "whole" compacts once. placement True seeds and anneals on the paired-lane array, a Placement
+        # fixes the mapping, False keeps index order on the sparse square. layout None uses `shape`,
+        # "stats" the shape predicted from the DAG, an int compares that many smallest-area shapes.
+        # factory alone puts one factory behind every magic tile; factories = F shares F of them.
+        self.dependency = dependency
+        self.routing = routing
+        self.spacing = spacing
+        self.placement = placement
+        self.layout_mode = layout
         self.shape_option = shape
-        self.extra, self.share, self.row_budget, self.col_budget, self.exact = extra, share, row_budget, col_budget, exact
-        self.factory, self.factories = factory, factories
-        self.seed, self.iters, self.anneal, self.weights, self.init = seed, iters, anneal, weights, init
-        # results of the last solve (of the selected shape when several were tried)
+        self.extra = extra
+        self.share = share
+        self.row_budget = row_budget
+        self.col_budget = col_budget
+        self.exact = exact
+        self.factory = factory
+        self.factories = factories
+        self.seed = seed
+        self.iters = iters
+        self.anneal = anneal
+        self.weights = weights
+        self.init = init
+
+        # results of the last solve, of the selected shape when several were tried
         self.shape: Optional[Shape] = None
         self.layout: Optional[Layout] = None
         self.mapping: Optional[Mapping] = None
-        self.partitions: List[Partition] = []
-        self.windows: List[Tuple[int, int]] = []
-        self.keep_rows: List[int] = []
-        self.keep_cols: List[int] = []
-        self.initial_cost = self.final_cost = 0.0
-        self.tried: List[dict] = []
-        self.profile: List[dict] = []
+        self.partitions: list[Partition] = []
+        self.windows: list[tuple[int, int]] = []
+        self.keep_rows: list[int] = []
+        self.keep_cols: list[int] = []
+        self.initial_cost = 0.0
+        self.final_cost = 0.0
+        self.tried: list[dict] = []
+        self.profile: list[dict] = []
         self.hierarchy_stats: dict = {}
         self.hierarchy_plan: Optional[hierarchical.Plan] = None
-        self.hierarchy_templates: List[Schedule] = []
+        self.hierarchy_templates: list[Schedule] = []
 
     @property
     def name(self) -> str:
-        """The ladder label of the last component, with non-default options as suffixes."""
+        # The ladder label of the last component, with the non-default options as suffixes.
         if self.layout_mode is not None:
             label = "layout"
         elif self.placement:
@@ -113,46 +92,47 @@ class Compiler:
             label = "routing"
         else:
             label = "dependency" if self.dependency else "vanilla"
+
         suffix = ""
         if isinstance(self.layout_mode, int):
             suffix += f"-shapes{self.layout_mode}"
-        if self.init != DEFAULTS["init"] and self.placement is True:
+        if self.init != constant.INITIAL_PLACEMENT and self.placement is True:
             suffix += f"-{self.init}"
-        if self.seed != DEFAULTS["seed"] and self.placement:
+        if self.seed != constant.PLACEMENT_SEED and self.placement:
             suffix += f"-s{self.seed}"
         if self.factory is not None and self.routing:
             suffix += f"-{self.factory.height}x{self.factory.width}x{self.factory.period}"
         if self.factories and self.routing:
             suffix += f"-f{self.factories}"
-        if self.extra != DEFAULTS["extra"] and self.spacing is True:
+        if self.extra != constant.SPACING_EXTRA_LANES and self.spacing is True:
             suffix += f"-extra{self.extra}"
-        if self.share != DEFAULTS["share"] and self.routing:
+        if self.share != constant.ROUTING_SHARE_PENALTY and self.routing:
             suffix += f"-share{self.share:g}"
         if self.hierarchy_stats:
             suffix += "-hierarchical"
         return label + suffix
 
-    # ---- the three passes ------------------------------------------------------------
     def map(self, problem: Problem, shape: Optional[Shape] = None, workload: Optional[Workload] = None) -> Mapping:
-        """Mapping and layout for one shape: fixed, placed, or index order."""
         if isinstance(self.placement, Placement):
             placed = self.placement
         else:
             placed = place(problem, shape, bool(self.placement), self.seed, self.iters, self.anneal, self.weights,
                            workload, self.init)
-        self.mapping, self.layout = placed.mapping, placed.layout
-        self.initial_cost, self.final_cost = placed.initial_cost, placed.final_cost
+        self.mapping = placed.mapping
+        self.layout = placed.layout
+        self.initial_cost = placed.initial_cost
+        self.final_cost = placed.final_cost
         return placed.mapping
 
-    def budgets(self, mapping: Mapping) -> Tuple[int, int]:
-        """Rows and columns a partition may retain; the whole grid when nothing is partitioned."""
+    def budgets(self, mapping: Mapping) -> tuple[int, int]:
+        # Rows and columns a partition may retain, the whole grid when nothing is partitioned.
         if self.spacing is True:
             return budgets(self.layout, self.extra, self.row_budget, self.col_budget)
         return (self.row_budget if self.row_budget is not None else mapping.height,
                 self.col_budget if self.col_budget is not None else mapping.width)
 
     def route(self, problem: Problem, mapping: Mapping) -> Schedule:
-        """The schedule; the router also records the partition windows it closed."""
+        # The router also records the partition windows it closed.
         self.windows = []
         if self.routing:
             steps, self.windows = routing.route(problem, mapping, *self.budgets(mapping), self.share, self.exact,
@@ -161,8 +141,9 @@ class Compiler:
         return schedule(problem, mapping, self.dependency)
 
     def build(self, problem: Problem, mapping: Mapping, steps: Schedule) -> Program:
-        """Plain program, whole-program compaction, or staged partitions with walks."""
-        self.partitions, self.keep_rows, self.keep_cols = [], [], []
+        self.partitions = []
+        self.keep_rows = []
+        self.keep_cols = []
         if self.spacing is True:
             program, self.partitions = space(problem, mapping, steps, "partition",
                                              windows=self.windows if self.routing else None, budgets=self.budgets(mapping))
@@ -174,22 +155,24 @@ class Compiler:
 
     def solve_shape(self, problem: Problem, shape: Optional[Shape] = None,
                     cells: Optional[hierarchical.Plan] = None, workload: Optional[Workload] = None) -> Program:
-        """One compilation on one shape, timed into `profile`."""
-        t0 = time.perf_counter()
+        started = time.perf_counter()
         mapping = self.map(problem, shape, workload)
-        t1 = time.perf_counter()
-        self.hierarchy_plan, self.hierarchy_templates = cells, []
+        mapped = time.perf_counter()
+
+        self.hierarchy_plan = cells
+        self.hierarchy_templates = []
         if cells is None:
             steps = self.route(problem, mapping)
-            compose_s = windows_s = 0.0
+            compose_s = 0.0
+            windows_s = 0.0
             self.hierarchy_stats = {}
         else:
+            # Descendants are reusable templates; only the root consumes the chip's supply, so no
+            # child starts a fresh factory clock.
             compose_s = 0.0
             templates = self.hierarchy_templates
-            for i, cell in enumerate(cells.cells):
-                # Descendants are reusable templates. Only the root consumes the
-                # actual chip's supply, so no child starts a fresh factory clock.
-                supply = supply_limits(self.factory, self.factories) if i == cells.root else (1, 0, 11)
+            for index, cell in enumerate(cells.cells):
+                supply = supply_limits(self.factory, self.factories) if index == cells.root else (1, 0, constant.FACTORY_PERIOD)
                 if cell.calls:
                     started = time.perf_counter()
                     templates.append(hierarchical.compose(cell.problem, mapping, cell.calls, templates, *supply))
@@ -198,17 +181,20 @@ class Compiler:
                     templates.append(routing.route(cell.problem, mapping, mapping.height, mapping.width,
                                                    self.share, self.exact, *supply)[0])
             steps = templates[cells.root] if cells.root is not None else []
+
+            # Cell windows cannot be reused, since overlap and rerouting change the loaded lines.
             composed = time.perf_counter()
-            # Cell windows cannot be reused: overlap/rerouting changes loaded lines.
             self.windows = (cut(mapping, steps, *self.budgets(mapping)) or [(0, 0)]) if self.spacing is True else []
             windows_s = time.perf_counter() - composed
             self.hierarchy_stats = cells.stats()
-        t2 = time.perf_counter()
+        routed = time.perf_counter()
+
         program = self.build(problem, mapping, steps)
-        t3 = time.perf_counter()
+        built = time.perf_counter()
         self.shape = shape if shape is not None else (self.layout.site_rows, self.layout.site_cols)
-        self.profile.append({"map_s": t1 - t0, "route_s": t2 - t1 - compose_s - windows_s,
-                             "compose_s": compose_s, "windows_s": windows_s, "compact_s": t3 - t2, "total_s": t3 - t0,
+        self.profile.append({"map_s": mapped - started, "route_s": routed - mapped - compose_s - windows_s,
+                             "compose_s": compose_s, "windows_s": windows_s, "compact_s": built - routed,
+                             "total_s": built - started,
                              "shape": list(self.shape), "grid": [program.height, program.width],
                              "steps": len(program.steps), "volume": program.volume, **self.hierarchy_stats})
         return program
@@ -216,32 +202,29 @@ class Compiler:
     def solve(self, problem: Problem) -> Program:
         return self._solve(problem)
 
-    def solve_hierarchy(self, hierarchy: Hierarchy, placement_mode: str = "weighted") -> Program:
-        """Route leaves, compose and cache each parent, then apply spacing at the root.
-
-        Requires routing=True. `weighted` placement uses leaf-local layers weighted
-        by expanded call counts; `flat` uses the full DAG for controlled comparisons.
-        There is no size cutoff. Shape selection still uses the full DAG. Hierarchy
-        and output remain expanded; templates are cached only for the current mapping.
-        """
-        if not self.routing:
-            raise ValueError("hierarchical compilation requires routing=True")
-        if placement_mode not in ("weighted", "flat"):
-            raise ValueError("hierarchy placement must be 'weighted' or 'flat'")
-        t0 = time.perf_counter()
+    def solve_hierarchy(self, hierarchy: Hierarchy, placement_mode: str = constant.HIERARCHY_PLACEMENT) -> Program:
+        # Route the leaves, compose and cache each parent, then space at the root. Needs routing.
+        # "weighted" places from leaf layers weighted by expanded call counts, "flat" from the full DAG.
+        started = time.perf_counter()
         cells = hierarchical.extract(hierarchy)
         workload = cells.workload(hierarchy.n_qubits) if placement_mode == "weighted" else None
-        extract_s = time.perf_counter() - t0
+        extract_s = time.perf_counter() - started
+
         program = self._solve(hierarchy.problem, cells, workload)
         self.hierarchy_stats.update(placement_mode=placement_mode, extract_s=extract_s)
         return program
 
     def _solve(self, problem: Problem, cells: Optional[hierarchical.Plan] = None,
                workload: Optional[Workload] = None) -> Program:
-        self.tried, self.profile = [], []
+        self.tried = []
+        self.profile = []
         if self.layout_mode is None:
             return self.solve_shape(problem, self.shape_option, cells, workload)
-        shapes = [stats_shape(problem)] if self.layout_mode == "stats" else candidate_shapes(problem.n_qubits, self.layout_mode, squarest=True)
+
+        if self.layout_mode == "stats":
+            shapes = [stats_shape(problem)]
+        else:
+            shapes = candidate_shapes(problem.n_qubits, self.layout_mode, squarest=True)
         best = None
         for shape in shapes:
             program = self.solve_shape(problem, shape, cells, workload)
@@ -256,7 +239,8 @@ class Compiler:
         return program
 
 
-PRESETS = {  # name -> Compiler keyword arguments; the ladder, then the development controls
+# Compiler keyword arguments by preset name: the ladder, then the development controls.
+PRESETS = {
     "vanilla": dict(dependency=False),
     "dependency": dict(),
     "routing": dict(routing=True),
@@ -267,16 +251,15 @@ PRESETS = {  # name -> Compiler keyword arguments; the ladder, then the developm
     "staged": dict(spacing=True),
     "placed": dict(placement=True),
 }
+
+
 def make(name: str, shapes: Union[None, str, int] = None, **options) -> Compiler:
-    """A preset by name with option overrides. `shapes` replaces the
-    preset's layout mode: "stats" or a count; "default" and None keep it."""
-    if name not in PRESETS:
-        raise KeyError(f"unknown solver {name!r}; choose from {', '.join(PRESETS)}")
-    kw = dict(PRESETS[name])
-    if shapes not in (None, "default") and "layout" in kw:
-        kw["layout"] = shapes
-    kw.update(options)
-    return Compiler(**kw)
+    # `shapes` replaces the preset's layout mode, "stats" or a count; None and "default" keep it.
+    arguments = dict(PRESETS[name])
+    if shapes not in (None, "default") and "layout" in arguments:
+        arguments["layout"] = shapes
+    arguments.update(options)
+    return Compiler(**arguments)
 
 
 SOLVERS = {name: functools.partial(make, name) for name in PRESETS}

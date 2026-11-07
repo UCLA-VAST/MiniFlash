@@ -1,15 +1,6 @@
-"""miniflash: compile Clifford+T OpenQASM 2.0 into a lattice-surgery tile program.
-
-parse -> Problem (pair DAG) -> Compiler (place, route, space) -> Program (one step
-graph per time step) -> verify -> write_gltf::
-
-    import miniflash as flash
-
-    problem = flash.read_qasm("circuit.qasm")
-    program = flash.make("layout", seed=0).solve(problem)
-    report = flash.verify(problem, program)
-    flash.write_gltf(program, "layout.gltf")
-"""
+# miniflash compiles Clifford+T OpenQASM 2.0 into a lattice-surgery tile program:
+# parse to a Problem (the pair DAG), Compiler (place, route, space) to a Program (one step graph
+# per time step), verify, write_gltf.
 from .circuit import MAGIC, Builder, Pair, Problem, from_circuit, read_qasm, to_dot
 from .parse import parse
 from .mapping import Layout, Mapping

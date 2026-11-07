@@ -1,190 +1,169 @@
-"""The glTF backend: a tile Program to a self-contained scene file.
+# The glTF backend lowers a tile Program to pipes on a cube lattice and writes a glTF 2.0 scene. Every step spans two
+# layers, 2t and 2t + 1, and tile (row, col) on layer k sits at cube (STRIDE * col, STRIDE * row, STRIDE * k). Each
+# qubit is a red K pipe through every layer, and a walk adds its I and J pipes in orange on the first layer of the
+# later step. A CX merge leaves its control vertically on the lower layer in blue, climbs at its first turn, the
+# ancilla, and enters its target horizontally on the upper layer in red, while a T merge lies on the lower layer in
+# blue. Grey cubes mark every occupied tile and green marks the consumed magic tiles, the factories and the deliveries.
+from __future__ import annotations
 
-:func:`write_gltf` lowers the step graphs of a :class:`~miniflash.program.Program`
-to pipes on a 3-D lattice and emits glTF 2.0. Every step spans two K layers,
-2t and 2t + 1; tile (row, col) on layer k sits at cube
-(STRIDE * col, STRIDE * row, STRIDE * k).
-
-* each qubit is a red K (time) pipe through every layer; a walk adds its I/J
-  pipes (orange) on the first layer of the later step;
-* a CX merge runs from the Z side of its control to the X side of its target.
-  Every qubit faces the same way, so the route leaves the control vertically and
-  enters the target horizontally and turns somewhere; its first turn is the
-  ancilla. The Z half, from the control to the ancilla, lies on the lower layer
-  (blue); a K pipe climbs at the ancilla (blue); the X half, from the ancilla to
-  the target, lies on the upper layer (red);
-* a T merge lies on the lower layer (blue), the magic state prepared in whatever
-  basis its side needs;
-* grey cubes mark every occupied tile, green boxes the consumed magic tiles;
-* with a :class:`~miniflash.supply.Supply`, each factory is a green box through the
-  whole program outside the delivery rings, and each consumed state a green path
-  from its factory's port to its magic tile on the layer where the T merge runs.
-"""
 import base64
 import json
 import struct
-from typing import NamedTuple
+from typing import Iterable, NamedTuple, Optional
 
-from .program import MAGIC, QUBIT, ROUTE
+from . import constant
+from .mapping import Coord
+from .program import MAGIC, QUBIT, ROUTE, Program, Step
+from .supply import Supply
 
-STRIDE = 2
 
 _UNIT_POSITIONS = ((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))
 _UNIT_INDICES = (0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2)
 
-
-PIPE_AXIS_SCALE = 1.4
-PIPE_CROSS_SCALE = 0.55
+Cube = tuple[int, int, int]
 
 
 class _Pipe(NamedTuple):
-    #: low cube endpoint
-    lo: tuple
-    #: high cube endpoint
-    hi: tuple
-    #: "I" | "J" | "K"
-    axis: str
-    #: color bit for rendering: 0 red (X), 1 blue (Z)
-    parity: int
-    #: Hadamard wall on this segment
-    hadamard: bool = False
-    #: magic-state volume
-    t_volume: bool = False
-    #: a qubit moving between partitions
-    walk: bool = False
+    lo: Cube
+    hi: Cube
+    axis: str                # I, J or K
+    parity: int              # 0 red for X, 1 blue for Z
+    hadamard: bool = False   # a Hadamard wall on this segment
+    t_volume: bool = False   # magic-state volume
+    walk: bool = False       # a qubit moving between partitions
 
 
-def _cube(tile, layer):
-    return (STRIDE * tile[1], STRIDE * tile[0], STRIDE * layer)
+def _cube(tile: Coord, layer: int) -> Cube:
+    return (constant.GLTF_STRIDE * tile[1], constant.GLTF_STRIDE * tile[0], constant.GLTF_STRIDE * layer)
 
 
-def _pipe(a, b, parity):
-    """Pipe between two cubes that differ on exactly one axis."""
-    lo, hi = min(a, b), max(a, b)
-    axis = "IJK"[next(i for i in range(3) if lo[i] != hi[i])]
-    return _Pipe(lo, hi, axis, parity)
+def _pipe(start: Cube, end: Cube, parity: int) -> _Pipe:
+    # The two cubes differ on exactly one axis.
+    low, high = min(start, end), max(start, end)
+    axis = "IJK"[next(i for i in range(3) if low[i] != high[i])]
+    return _Pipe(low, high, axis, parity)
 
 
-def _route_path(step, comp, z_tile):
-    """Tiles of a merge component in walking order from the Z party to the X party."""
-    adj = step.neighbours()
-    path, prev = [z_tile], None
+def _route_path(step: Step, component: Iterable[Coord], z_tile: Coord) -> list[Coord]:
+    # Tiles of a merge in walking order from the Z party to the X party.
+    neighbours = step.neighbours()
+    path = [z_tile]
+    previous = None
     while True:
-        nxt = [n for n in adj[path[-1]] if n != prev and n in comp]
-        if not nxt or (len(path) > 1 and step.vertices[path[-1]].kind != ROUTE):
+        onward = [tile for tile in neighbours[path[-1]] if tile != previous and tile in component]
+        if not onward or (len(path) > 1 and step.vertices[path[-1]].kind != ROUTE):
             return path
-        prev = path[-1]
-        path.append(nxt[0])
+        previous = path[-1]
+        path.append(onward[0])
 
 
-def _z_party(step, comp):
-    """The qubit merged through its top or bottom: the control of a CX, the qubit of a T."""
-    adj = step.neighbours()
-    for tile in comp:
-        if step.vertices[tile].kind == QUBIT and all(n[1] == tile[1] for n in adj[tile]):
+def _z_party(step: Step, component: Iterable[Coord]) -> Coord:
+    # The qubit merged through its top or bottom, the control of a CX or the qubit of a T.
+    neighbours = step.neighbours()
+    for tile in component:
+        if step.vertices[tile].kind == QUBIT and all(neighbour[1] == tile[1] for neighbour in neighbours[tile]):
             return tile
-    raise ValueError(f"merge {sorted(comp)} enters no qubit through its Z side")
 
 
-def _direction(a, b):
-    return (b[0] - a[0], b[1] - a[1])
+def _direction(src: Coord, dst: Coord) -> tuple[int, int]:
+    return (dst[0] - src[0], dst[1] - src[1])
 
 
-def ancilla(path):
-    """Index in `path` of the first tile where the route turns."""
+def ancilla(path: list[Coord]) -> int:
+    # Index of the first tile where the route turns.
     for i in range(1, len(path) - 1):
         if _direction(path[i - 1], path[i]) != _direction(path[i], path[i + 1]):
             return i
-    raise ValueError(f"CX route {path} runs along one line: no turn for the ancilla")
 
 
-def _merge_pipes(step, t):
-    """The two layers of step t: Z halves and T merges below, the ancilla K pipes,
-    X halves above."""
-    lower_layer, upper_layer = 2 * t, 2 * t + 1
+def _merge_pipes(step: Step, step_index: int) -> list[_Pipe]:
+    # Z halves and T merges lie on the lower layer of the step, the ancilla climbs, and X halves lie on the upper one.
+    lower_layer, upper_layer = 2 * step_index, 2 * step_index + 1
     pipes = []
-    for comp in step.components():
-        path = _route_path(step, comp, _z_party(step, comp))
+    for component in step.components():
+        path = _route_path(step, component, _z_party(step, component))
         if step.vertices[path[-1]].kind == MAGIC:
-            pipes.extend(_pipe(_cube(a, lower_layer), _cube(b, lower_layer), 1) for a, b in zip(path, path[1:]))
+            pipes.extend(_pipe(_cube(tile_a, lower_layer), _cube(tile_b, lower_layer), 1)
+                         for tile_a, tile_b in zip(path, path[1:]))
             continue
-        k = ancilla(path)
-        pipes.extend(_pipe(_cube(a, lower_layer), _cube(b, lower_layer), 1) for a, b in zip(path[:k], path[1:k + 1]))
-        pipes.append(_pipe(_cube(path[k], lower_layer), _cube(path[k], upper_layer), 1))
-        pipes.extend(_pipe(_cube(a, upper_layer), _cube(b, upper_layer), 0) for a, b in zip(path[k:], path[k + 1:]))
+        turn = ancilla(path)
+        pipes.extend(_pipe(_cube(tile_a, lower_layer), _cube(tile_b, lower_layer), 1)
+                     for tile_a, tile_b in zip(path[:turn], path[1:turn + 1]))
+        pipes.append(_pipe(_cube(path[turn], lower_layer), _cube(path[turn], upper_layer), 1))
+        pipes.extend(_pipe(_cube(tile_a, upper_layer), _cube(tile_b, upper_layer), 0)
+                     for tile_a, tile_b in zip(path[turn:], path[turn + 1:]))
     return pipes
 
 
-def _qubit_pipes(step, t, after=None):
-    """Each qubit's K pipe through step t and, when a later step follows, on to it,
-    with the walk's I/J pipes on that step's first layer."""
+def _qubit_pipes(step: Step, step_index: int, after: Optional[Step] = None) -> list[_Pipe]:
+    # Each qubit's K pipe through the step and on to the next step, with its walk on that step's first layer.
     pipes = []
-    here = step.qubit_tiles()
-    there = after.qubit_tiles() if after is not None else {}
-    for q, src in here.items():
-        pipes.append(_pipe(_cube(src, 2 * t), _cube(src, 2 * t + 1), 0))
+    seats = step.qubit_tiles()
+    next_seats = after.qubit_tiles() if after is not None else {}
+    for qubit, src in seats.items():
+        pipes.append(_pipe(_cube(src, 2 * step_index), _cube(src, 2 * step_index + 1), 0))
         if after is None:
             continue
-        dst, nxt = there[q], 2 * t + 2
-        pipes.append(_pipe(_cube(src, 2 * t + 1), _cube(src, nxt), 0))
+        dst = next_seats[qubit]
+        next_layer = 2 * step_index + 2
+        pipes.append(_pipe(_cube(src, 2 * step_index + 1), _cube(src, next_layer), 0))
         corner = (src[0], dst[1])
         if corner != src:
-            pipes.append(_pipe(_cube(src, nxt), _cube(corner, nxt), 0)._replace(walk=True))
+            pipes.append(_pipe(_cube(src, next_layer), _cube(corner, next_layer), 0)._replace(walk=True))
         if dst != corner:
-            pipes.append(_pipe(_cube(corner, nxt), _cube(dst, nxt), 0)._replace(walk=True))
+            pipes.append(_pipe(_cube(corner, next_layer), _cube(dst, next_layer), 0)._replace(walk=True))
     return pipes
 
 
-def _delivery_pipes(supply):
-    """Green pipes along every delivery path, on the lower layer of its step."""
+def _delivery_pipes(supply: Supply) -> list[_Pipe]:
+    # Green pipes along every delivery path, on the lower layer of its step.
     pipes = []
-    for d in supply.deliveries:
-        layer = 2 * d.step
-        pipes.extend(_pipe(_cube(a, layer), _cube(b, layer), 1)._replace(t_volume=True) for a, b in zip(d.tiles, d.tiles[1:]))
+    for delivery in supply.deliveries:
+        layer = 2 * delivery.step
+        pipes.extend(_pipe(_cube(tile_a, layer), _cube(tile_b, layer), 1)._replace(t_volume=True)
+                     for tile_a, tile_b in zip(delivery.tiles, delivery.tiles[1:]))
     return pipes
 
 
-def factory_boxes(program, supply):
-    """(lo, hi) corners of each factory box, through every layer of the program."""
-    top = STRIDE * (2 * len(program.steps) - 1) + 1
-    return [((STRIDE * b.col, STRIDE * b.row, 0), (STRIDE * (b.col + b.width - 1) + 1, STRIDE * (b.row + b.height - 1) + 1, top))
-            for b in supply.boxes]
+def factory_boxes(program: Program, supply: Supply) -> list[tuple[Cube, Cube]]:
+    # The (low, high) corners of each factory box through every layer of the program, high exclusive.
+    stride = constant.GLTF_STRIDE
+    top = stride * (2 * len(program.steps) - 1) + 1
+    return [((stride * box.col, stride * box.row, 0),
+             (stride * (box.col + box.width - 1) + 1, stride * (box.row + box.height - 1) + 1, top))
+            for box in supply.boxes]
 
 
-def lower(program, supply=None):
-    """Pipes, cubes and magic boxes of a Program.
-
-    :param program: Program.
-    :param supply: Supply | None, see :func:`miniflash.supply.plan`; adds the
-        delivery pipes (factory ports excluded from the cubes, they sit in the boxes).
-    :returns: (pipes, cubes, magic) — list of _Pipe, sorted cube positions, sorted
-        consumed-magic cube positions.
-    """
-    pipes, cubes, magic = [], set(), set()
+def lower(program: Program, supply: Optional[Supply] = None) -> tuple[list[_Pipe], list[Cube], list[Cube]]:
+    # A supply adds the delivery pipes, and its factory ports are left out of the cubes since they sit in the boxes.
+    pipes = []
+    cubes = set()
+    magic = set()
     steps = program.steps
-    for t, step in enumerate(steps):
-        for v in step.of_kind(MAGIC):
-            if v.id >= 0:
-                magic.add(_cube(v.tile, 2 * t))
-        pipes.extend(_merge_pipes(step, t))
-        pipes.extend(_qubit_pipes(step, t, steps[t + 1] if t + 1 < len(steps) else None))
+    for step_index, step in enumerate(steps):
+        for vertex in step.of_kind(MAGIC):
+            if vertex.id >= 0:
+                magic.add(_cube(vertex.tile, 2 * step_index))
+        pipes.extend(_merge_pipes(step, step_index))
+        pipes.extend(_qubit_pipes(step, step_index, steps[step_index + 1] if step_index + 1 < len(steps) else None))
     if supply is not None:
         pipes.extend(_delivery_pipes(supply))
+
     for pipe in pipes:
         cubes.add(pipe.lo)
         cubes.add(pipe.hi)
     cubes -= magic
     if supply is not None:
-        cubes -= {_cube(b.port, 2 * d.step) for d in supply.deliveries for b in [supply.boxes[d.factory]]}
+        cubes -= {_cube(supply.boxes[delivery.factory].port, 2 * delivery.step) for delivery in supply.deliveries}
     pipes.sort(key=lambda pipe: (pipe.lo, pipe.hi, pipe.axis))
-    return pipes, sorted(cubes), sorted(magic)
+    return pipes, sorted(cubes), sorted(magic)   # pipes, grey cubes, consumed magic cubes
 
 
-def _collect_pipe_boxes(pipes):
+def _collect_pipe_boxes(pipes: list[_Pipe]) -> list[tuple[Cube, int, str]]:
     entries = []
     for pipe in pipes:
         low, high = tuple(pipe.lo), tuple(pipe.hi)
-        middle = tuple((low[coordinate] + high[coordinate]) // 2 for coordinate in range(3))
+        middle = tuple((low[i] + high[i]) // 2 for i in range(3))
         if pipe.walk:
             material = 5
         elif pipe.hadamard:
@@ -198,17 +177,17 @@ def _collect_pipe_boxes(pipes):
     return [(middle, material, axis) for _low, material, middle, axis in entries]
 
 
-def _pipe_node(middle, material, axis):
+def _pipe_node(middle: Cube, material: int, axis: str) -> dict:
     axis_index = {"I": 0, "J": 1, "K": 2}[axis]
-    scale = [PIPE_CROSS_SCALE] * 3
-    scale[axis_index] = PIPE_AXIS_SCALE
-    margin = (1.0 - PIPE_CROSS_SCALE) / 2
+    scale = [constant.PIPE_CROSS_SCALE] * 3
+    scale[axis_index] = constant.PIPE_AXIS_SCALE
+    margin = (1.0 - constant.PIPE_CROSS_SCALE) / 2
     translation = [float(coordinate) + margin for coordinate in middle]
-    translation[axis_index] = float(middle[axis_index]) - (PIPE_AXIS_SCALE - 1.0) / 2
+    translation[axis_index] = float(middle[axis_index]) - (constant.PIPE_AXIS_SCALE - 1.0) / 2
     return {"mesh": material, "translation": translation, "scale": scale}
 
 
-def _pack_shared_mesh():
+def _pack_shared_mesh() -> tuple[bytes, int, int, int]:
     position_bytes = struct.pack("<24f", *(value for vertex in _UNIT_POSITIONS for value in vertex))
     index_bytes = struct.pack("<36H", *_UNIT_INDICES)
     buffer = bytearray(position_bytes)
@@ -219,48 +198,29 @@ def _pack_shared_mesh():
     return bytes(buffer), len(position_bytes), index_offset, len(index_bytes)
 
 
-def _inside(position, lo, hi):
-    return all(l <= x <= h for x, l, h in zip(position, lo, hi))
+def _inside(position: Cube, low: Cube, high: Cube) -> bool:
+    return all(low[i] <= position[i] <= high[i] for i in range(3))
 
 
-def write_gltf(program, path, supply=None, overlays=(), carve=False):
-    """Render a Program as a glTF 2.0 scene file.
-
-    Materials: red/blue parity pipes, grey cubes, yellow Hadamard, green magic, orange walks.
-
-    :param program: Program.
-    :param path: str | Path of the output ``.gltf``.
-    :param supply: Supply | None; draws factories and deliveries.
-    :param overlays: iterable of (lo, hi, rgba) boxes in cube coordinates, lo and hi the
-        inclusive low and high cube corners, drawn with their own colour; an alpha below
-        1 makes the box translucent. See :func:`miniflash.resynthesis.viz.boxes`.
-    :param carve: bool; drop every pipe and cube inside an overlay, so the overlays stand
-        as opaque cells and only the program outside them remains (the coarse view).
-    :returns: None.
-    """
+def write_gltf(program: Program, path, supply: Optional[Supply] = None, overlays: Iterable[tuple] = (),
+               carve: bool = False) -> None:
+    # carve drops every pipe and cube inside an overlay, a (low, high, rgba) box of inclusive cube corners.
     pipes, cubes, magic = lower(program, supply)
     boxes = factory_boxes(program, supply) if supply is not None else []
-    overlays = [(tuple(lo), tuple(hi), tuple(rgba)) for lo, hi, rgba in overlays]
+    overlays = [(tuple(low), tuple(high), tuple(rgba)) for low, high, rgba in overlays]
     if carve and overlays:
         def outside(*positions):
-            return not any(all(_inside(x, lo, hi) for x in positions) for lo, hi, _ in overlays)
+            return not any(all(_inside(position, low, high) for position in positions) for low, high, _ in overlays)
         pipes = [pipe for pipe in pipes if outside(pipe.lo, pipe.hi)]
-        cubes = [c for c in cubes if outside(c)]
-        magic = [m for m in magic if outside(m)]
+        cubes = [cube for cube in cubes if outside(cube)]
+        magic = [magic_cube for magic_cube in magic if outside(magic_cube)]
     write_scene(path, pipes, cubes, magic, boxes, overlays)
 
 
-def write_scene(path, pipes, cubes, magic, boxes=(), overlays=()):
-    """Write pipes, cubes, magic boxes, factory boxes and overlays as a glTF 2.0 file.
-
-    :param pipes: list of _Pipe.
-    :param cubes: cube positions drawn grey.
-    :param magic: cube positions drawn green.
-    :param boxes: (lo, hi) corners drawn green, hi exclusive.
-    :param overlays: (lo, hi, rgba) boxes, hi inclusive, each colour its own material.
-    :returns: None.
-    """
-    overlays = [(tuple(lo), tuple(hi), tuple(rgba)) for lo, hi, rgba in overlays]
+def write_scene(path, pipes: list[_Pipe], cubes: Iterable[Cube], magic: Iterable[Cube], boxes: Iterable[tuple] = (),
+                overlays: Iterable[tuple] = ()) -> None:
+    # Factory boxes take high exclusive and overlays inclusive, each overlay colour becoming its own material.
+    overlays = [(tuple(low), tuple(high), tuple(rgba)) for low, high, rgba in overlays]
     pipe_boxes = _collect_pipe_boxes(pipes)
     buffer, position_bytes_length, index_offset, index_bytes_length = _pack_shared_mesh()
 
@@ -286,7 +246,7 @@ def write_scene(path, pipes, cubes, magic, boxes=(), overlays=()):
     }
     palette = list(dict.fromkeys(rgba for _, _, rgba in overlays))
     for rgba in palette:
-        material = {"pbrMetallicRoughness": {"baseColorFactor": [float(x) for x in rgba]}, "doubleSided": True}
+        material = {"pbrMetallicRoughness": {"baseColorFactor": [float(channel) for channel in rgba]}, "doubleSided": True}
         if rgba[3] < 1.0:
             material["alphaMode"] = "BLEND"
         root["materials"].append(material)
@@ -300,14 +260,14 @@ def write_scene(path, pipes, cubes, magic, boxes=(), overlays=()):
         nodes.append({"mesh": 2, "translation": [float(coordinate) for coordinate in position], "scale": [1.0, 1.0, 1.0]})
     for position in magic:
         nodes.append({"mesh": 4, "translation": [float(coordinate) for coordinate in position], "scale": [1.0, 1.0, 1.0]})
-    for lo, hi in boxes:
-        nodes.append({"mesh": 4, "translation": [float(x) for x in lo], "scale": [float(h - l) for l, h in zip(lo, hi)]})
-    for lo, hi, rgba in overlays:
-        nodes.append({"mesh": 6 + palette.index(rgba), "translation": [float(x) for x in lo],
-                      "scale": [float(h - l + 1) for l, h in zip(lo, hi)]})
+    for low, high in boxes:
+        nodes.append({"mesh": 4, "translation": [float(coordinate) for coordinate in low],
+                      "scale": [float(high[i] - low[i]) for i in range(3)]})
+    for low, high, rgba in overlays:
+        nodes.append({"mesh": 6 + palette.index(rgba), "translation": [float(coordinate) for coordinate in low],
+                      "scale": [float(high[i] - low[i] + 1) for i in range(3)]})
 
-    # root node rotates -90 deg about X so K (time) renders upward (+Y),
-    # matching the lattice-surgery convention; J recedes into the screen.
+    # The root node turns the scene -90 degrees about X so that K, the time axis, points up and J points into the screen.
     nodes.append({"children": list(range(len(nodes))), "rotation": [-0.7071068, 0.0, 0.0, 0.7071068]})
     root["nodes"] = nodes
     root["scenes"] = [{"nodes": [len(nodes) - 1]}]

@@ -1,19 +1,10 @@
-"""Scheduling: which pairs execute in each step, and along which routes.
-
-`schedule(problem, mapping)` is the dependency-aware schedule
-("+ Dependency"): a frontier holds the pairs whose predecessors have all finished,
-seeded with the DAG's sources. Each step walks the frontier in pair order; a pair
-whose shortest free candidate route exists is placed and its tiles (and magic tile,
-for a T) become occupied for the rest of the step, and a pair that finds no free
-route stays in the frontier. When the step ends, the successors of the placed pairs
-whose other predecessors are also done join the frontier, and the occupancy clears.
-
-With `dependency=False` (the vanilla reference point) every step executes one pair,
-in program order, along the shortest legal route; nothing ever blocks.
-"""
+# Scheduling: which pairs execute in each step and along which routes. A frontier holds the pairs whose
+# predecessors have all finished, seeded with the DAG's sources. Each step walks the frontier in pair order,
+# places a pair whose shortest free route exists and occupies that route's tiles and magic tile for the rest of
+# the step, and a pair that finds no free route stays in the frontier. When the step ends the successors whose
+# other predecessors are also done join the frontier and the occupancy clears. Without dependency every step
+# executes one pair in program order along the shortest legal route.
 from __future__ import annotations
-
-from typing import List, Set
 
 from ..circuit import Problem
 from ..mapping import Coord, Mapping
@@ -22,47 +13,53 @@ from ..route import Route, RouteError, Schedule, check_route, shortest_magic_rou
 
 def schedule(problem: Problem, mapping: Mapping, dependency: bool = True) -> Schedule:
     if not dependency:
-        out = []
-        for i, pair in enumerate(problem.pairs):
-            r = shortest_magic_route(i, pair.z, mapping) if pair.is_magic else shortest_route(i, pair.z, pair.x, mapping)
-            if r is None:
-                raise RouteError(f"pair {i} {pair}: no candidate route on the mapping")
-            check_route(r, pair, mapping)
-            out.append([r])
-        return out
+        steps = []
+        for pair_id, pair in enumerate(problem.pairs):
+            if pair.is_magic:
+                route = shortest_magic_route(pair_id, pair.z, mapping)
+            else:
+                route = shortest_route(pair_id, pair.z, pair.x, mapping)
+            if route is None:
+                raise RouteError(f"pair {pair_id} {pair}: no candidate route on the mapping")
+            check_route(route, pair, mapping)
+            steps.append([route])
+        return steps
+
     succs = problem.succs()
-    remaining = [len(p) for p in problem.preds]         # unfinished predecessors per pair
-    frontier = [i for i, n in enumerate(remaining) if n == 0]
+    remaining = [len(preds) for preds in problem.preds]   # unfinished predecessors per pair
+    frontier = [pair_id for pair_id, count in enumerate(remaining) if count == 0]
     done = 0
     steps: Schedule = []
     while frontier:
-        occupied: Set[Coord] = set()
-        consumed: Set[Coord] = set()
-        placed: List[Route] = []
-        waiting: List[int] = []
-        for i in frontier:
-            pair = problem.pairs[i]
+        occupied: set[Coord] = set()
+        consumed: set[Coord] = set()
+        placed: list[Route] = []
+        waiting: list[int] = []
+        for pair_id in frontier:
+            pair = problem.pairs[pair_id]
             if pair.is_magic:
-                r = shortest_magic_route(i, pair.z, mapping, blocked=occupied, consumed=consumed)
+                route = shortest_magic_route(pair_id, pair.z, mapping, blocked=occupied, consumed=consumed)
             else:
-                r = shortest_route(i, pair.z, pair.x, mapping, blocked=occupied)
-            if r is None:
-                waiting.append(i)
+                route = shortest_route(pair_id, pair.z, pair.x, mapping, blocked=occupied)
+            if route is None:
+                waiting.append(pair_id)
                 continue
-            placed.append(r)
-            occupied.update(r.tiles())
-            if r.magic is not None:
-                consumed.add(r.magic)
+            placed.append(route)
+            occupied.update(route.tiles())
+            if route.magic is not None:
+                consumed.add(route.magic)
         if not placed:
             raise RouteError(f"step {len(steps)}: no pair in the frontier {frontier} can be routed")
+
         steps.append(placed)
         done += len(placed)
-        for r in placed:
-            for j in succs[r.pair]:
-                remaining[j] -= 1
-                if remaining[j] == 0:
-                    waiting.append(j)
+        for route in placed:
+            for successor in succs[route.pair]:
+                remaining[successor] -= 1
+                if remaining[successor] == 0:
+                    waiting.append(successor)
         frontier = sorted(waiting)
+
     if done != len(problem.pairs):
         raise RouteError(f"{done} of {len(problem.pairs)} pairs scheduled")
     return steps

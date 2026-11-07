@@ -16,7 +16,7 @@ MAGIC_TILE = (0, 5)
 
 
 def step_with(routes, consumed=None):
-    """A step seating every qubit, plus one route per (pair, [tiles], z, x_or_magic)."""
+    # A step seating every qubit, plus one route per (pair, [tiles], z, x_or_magic).
     s = Step()
     for q, tile in SEATS.items():
         s.add(tile, QUBIT, q)
@@ -71,9 +71,11 @@ def test_overlap_merges_transitively_into_one_window():
     assert w.pairs == (0, 1, 2) and w.participants == (0, 1, 2, 3)
     assert w.critical_path(problem) == 2 and w.slack(problem) == 0
     w.check(program)
+
     # a window that claims the merged box over one step is not closed: CX12 is missing
     with pytest.raises(ValueError):
         Window(Box(0, 1, 4, 3), 1, 2, (), {}, ()).check(program)
+
     # and the second step alone still lists q0 and q3 as bystanders
     (w1,) = close(program, 1, 2)
     assert w1.participants == (1, 2) and w1.bystanders == {0: (1, 1), 3: (4, 3)}
@@ -87,6 +89,7 @@ def test_magic_consumption_is_a_port_not_a_bystander():
     (w,) = close(program, 0, 1)
     assert w.magic == ((0, MAGIC_TILE),) and w.ports == 3
     assert w.idle_magic == () and w.box == Box(0, 3, 1, 5)
+
     # an idle magic tile inside a box is listed, not counted as a port
     problem2, program2 = two_far_apart()
     wide = Window(Box(0, 1, 1, 5), 0, 1, close(program2, 0, 1)[0].components, {}, (MAGIC_TILE,))
@@ -114,6 +117,7 @@ def test_slab_gain_and_greedy_pick():
     assert len(two.windows) == 2 and two.gain(problem) == 1
     assert [(s.start, s.stop) for s in extract_greedy(program, problem)] == [(0, 2)]
     assert extract_greedy(program, problem, min_gain=2) == []
+
     # a budget too small for a two-step window stops the range early
     assert {(s.start, s.stop) for s in slabs(program, Budget(cubes=12))} == {(0, 1), (1, 2)}
 
@@ -141,7 +145,8 @@ def test_extracted_windows_are_closed_and_cover_their_slabs(name):
 
 def test_gltf_overlays_and_carve(tmp_path):
     import json
-    from miniflash.gltf import STRIDE, write_gltf
+    from miniflash.gltf import write_gltf
+    from miniflash.constant import GLTF_STRIDE as STRIDE
     from miniflash.resynthesis import boxes, window_box
     problem, program = two_far_apart()
     ws = close(program, 0, 1)
@@ -159,6 +164,7 @@ def test_gltf_overlays_and_carve(tmp_path):
     assert len(o["nodes"]) == len(p["nodes"]) + 2
     box = [n for n in o["nodes"] if n.get("mesh") == 6][0]
     assert box["translation"] == [2.0, 0.0, 0.0] and box["scale"] == [5.0, 3.0, 3.0]
+
     # carving drops the merge pipes and cubes inside the boxes but keeps the qubit pipes leaving them
     assert len(c["nodes"]) < len(o["nodes"])
     assert any(n.get("mesh") == 6 for n in c["nodes"])
@@ -166,6 +172,7 @@ def test_gltf_overlays_and_carve(tmp_path):
 
 def test_extract_dp_prefers_balanced_slabs_and_never_skips_a_step_that_fits():
     from miniflash.resynthesis import Weights, cost, extract_dp, skip_cost, total
+
     # cx(0,1) then cx(2,3): independent, so one two-step slab has depth 1 and no holes
     problem = Problem.from_pairs(4, [Pair(0, 1, "cx"), Pair(2, 3, "cx")])
     program = Program(6, 6, [step_with([CX01]), step_with([CX23])])
@@ -173,6 +180,7 @@ def test_extract_dp_prefers_balanced_slabs_and_never_skips_a_step_that_fits():
     assert (slab.start, slab.stop) == (0, 2)
     assert slab.depth(problem) == 1 and slab.holes(problem) == 0 and slab.cuts(problem) == 0
     assert cost(slab, problem, program.area) == 36
+
     # a chain in the merged window: depth 2, the far window one step shallower leaves holes
     problem2, program2 = two_far_apart()
     (one,) = [s for s in slabs(program2) if (s.start, s.stop) == (0, 2)]
@@ -180,6 +188,7 @@ def test_extract_dp_prefers_balanced_slabs_and_never_skips_a_step_that_fits():
     picked = extract_dp(program2, problem2)
     assert [(s.start, s.stop) for s in picked] == [(0, 2)]          # cutting would sever two edges
     assert [(s.start, s.stop) for s in extract_dp(program2, problem2, weights=Weights(cuts=0.0))] in ([(0, 2)], [(0, 1), (1, 2)])
+
     # a budget no window of step 1 fits: that step is skipped and charged its severed edges
     tight = Budget(area=6)
     picked = extract_dp(program2, problem2, tight)
@@ -224,14 +233,17 @@ def test_spec_ports_stabilizers_and_forbidden_cubes():
     assert [(p["location"], p["direction"], p["z_basis_direction"]) for p in s["ports"]] == [
         ([0, 1, 0], "+K", "I"), ([2, 1, 0], "+K", "I"), ([0, 1, 3], "-K", "I"), ([2, 1, 3], "-K", "I")]
     assert s["optional"]["forbidden_cubes"] == [[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 0, 0]]
+
     # control leaves upwards on the lower layer, the ancilla climbs, the X half runs above
     assert pipes(w, program) == {"I": {(0, 0, 2), (1, 1, 2)}, "J": {(0, 0, 1), (1, 0, 2)},
                                  "K": {(0, 0, 1), (0, 1, 0), (0, 1, 1), (0, 1, 2), (2, 1, 0), (2, 1, 1), (2, 1, 2)}}
+
     # bystanders and the magic tile are carved out of a wider window
     (whole,) = close(program, 1, 2)                   # cx(q1, q2) with q0 and q3 standing by
     f = {tuple(c) for c in spec(whole, program, problem)["optional"]["forbidden_cubes"]}
     for q, tile in whole.bystanders.items():
         assert all((tile[1] - whole.box.c0, tile[0] - whole.box.r0, k) in f for k in range(3))
+
     # a T merge: one magic port at the magic tile, towards the route, a Z spider leg
     problem, program, w = t_window()
     s = spec(w, program, problem)
@@ -284,6 +296,7 @@ def test_cell_keeps_the_solution_and_round_trips():
     assert ks == [(0, 1, 0), (0, 1, 1)]               # in through the bottom, out through the top
     back = Cell.from_dict(c.to_dict())
     assert back.window == c.window and back.depth == 1 and back.pipes() == c.pipes()
+
     # no gain: the cell is the tile program's own routing, pipe for pipe
     from miniflash.resynthesis.spec import pipes
     problem, program = two_far_apart()
@@ -296,9 +309,10 @@ def test_cell_keeps_the_solution_and_round_trips():
 def test_cells_are_drawn_in_place_of_their_slabs(tmp_path):
     needs_lassynth()
     import json
-    from miniflash.gltf import STRIDE
+    from miniflash.constant import GLTF_STRIDE as STRIDE
     from miniflash.resynthesis import Slab, lower_cells, timeline, write_cells
     from miniflash.resynthesis.synth import cells
+
     # T on q1 (one step, one layer after), then cx(q0, q1) left as the tile program has it
     problem = Problem.from_pairs(4, [Pair(1, MAGIC, "t"), Pair(0, 1, "cx")])
     program = Program(6, 6, [step_with([(0, [(0, 3), (0, 4)], 1, None)], consumed=0),
@@ -314,6 +328,7 @@ def test_cells_are_drawn_in_place_of_their_slabs(tmp_path):
         assert ((STRIDE * col, STRIDE * row, 0), (STRIDE * col, STRIDE * row, STRIDE)) in ks
     assert len({(p.lo, p.hi) for p in pipes}) == len(pipes)
     assert all(0 <= p.lo[2] and p.hi[2] <= STRIDE * (total - 1) for p in pipes)
+
     # in place the qubits idle one layer above the shallow cell
     inplace = lower_cells(program, plan, compact=False)
     assert inplace[4] == 4 and len(inplace[0]) == len(pipes) + len(SEATS)

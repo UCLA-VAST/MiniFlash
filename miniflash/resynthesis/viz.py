@@ -1,158 +1,147 @@
-"""Windows, slabs and cells in 3-D.
-
-    window_box   the cube-coordinate corners of a window, on the glTF lattice
-    boxes        one translucent (or opaque) box per window, coloured by slab, for
-                 :func:`miniflash.gltf.write_gltf`'s ``overlays``
-    timeline     where every step and slab starts once the cells are in, in layers
-    lower_cells  the pipes of a program whose slabs are replaced by cells
-    write_cells  that scene as a glTF file
-
-The overlay view keeps every pipe and lays the boxes over them; the carve view
-(``write_gltf(..., carve=True)``) removes what is inside the boxes so each window
-stands as an opaque cell: the program after coarsening, before any cell is
-resynthesised.
-"""
+# Windows, slabs and cells in 3-D. window_box gives the cube corners of a window on the glTF lattice, boxes one box per
+# window coloured by slab for write_gltf's overlays, timeline where every step and slab starts once the cells are in,
+# lower_cells the pipes of a program whose slabs are replaced by cells, and write_cells that scene as a glTF file. The
+# overlay view keeps every pipe and lays the boxes over them, while the carve view removes what is inside the boxes so
+# that each window stands as an opaque cell, the program after coarsening and before any cell is resynthesised.
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, Sequence
 
-from ..gltf import STRIDE, _Pipe, _merge_pipes, _qubit_pipes, write_scene
+from .. import constant
+from ..gltf import _Pipe, _merge_pipes, _qubit_pipes, write_scene
 from ..program import MAGIC, Program
 from .cell import Cell
-from .window import LAYERS_PER_STEP, Slab, Window
+from .window import Slab, Window
 
-# colours the pipe materials do not use (they take red, blue, grey, yellow, green, orange)
+# Colours the pipe materials do not use, which are red, blue, grey, yellow, green and orange.
 PALETTE = ((0.55, 0.25, 0.80), (0.10, 0.65, 0.70), (0.85, 0.30, 0.60),
            (0.45, 0.60, 0.10), (0.60, 0.40, 0.20), (0.20, 0.45, 0.85))
+Y_CUBE = (0.90, 0.25, 0.65, 1.0)   # pink
+Plan = Sequence[tuple[Slab, Sequence[Cell]]]
 
 
-def window_box(window: Window) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    """Inclusive (lo, hi) cube corners: columns along I, rows along J, both layers of
-    every step along K."""
-    lo = (STRIDE * window.box.c0, STRIDE * window.box.r0, STRIDE * LAYERS_PER_STEP * window.start)
-    hi = (STRIDE * window.box.c1, STRIDE * window.box.r1, STRIDE * (LAYERS_PER_STEP * window.stop - 1))
-    return lo, hi
+def window_box(window: Window) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    # Inclusive (low, high) cube corners, columns along I, rows along J and both layers of every step along K.
+    stride = constant.GLTF_STRIDE
+    low = (stride * window.box.c0, stride * window.box.r0, stride * constant.LAYERS_PER_STEP * window.start)
+    high = (stride * window.box.c1, stride * window.box.r1, stride * (constant.LAYERS_PER_STEP * window.stop - 1))
+    return low, high
 
 
-def boxes(slabs: Iterable[Slab], alpha: float = 0.35) -> List[Tuple[tuple, tuple, tuple]]:
-    """(lo, hi, rgba) per window, the windows of one slab sharing a colour and consecutive
-    slabs cycling through the palette. ``alpha`` 1.0 makes opaque cells."""
+def boxes(slabs: Iterable[Slab], alpha: float = constant.WINDOW_ALPHA) -> list[tuple[tuple, tuple, tuple]]:
+    # One (low, high, rgba) per window, the windows of one slab sharing a colour and consecutive slabs cycling PALETTE.
     out = []
-    for i, slab in enumerate(slabs):
-        rgb = PALETTE[i % len(PALETTE)]
-        for w in slab.windows:
-            lo, hi = window_box(w)
-            out.append((lo, hi, rgb + (alpha,)))
+    for slab_index, slab in enumerate(slabs):
+        rgb = PALETTE[slab_index % len(PALETTE)]
+        for window in slab.windows:
+            low, high = window_box(window)
+            out.append((low, high, rgb + (alpha,)))
     return out
 
 
-Y_CUBE = (0.90, 0.25, 0.65, 1.0)
-Plan = Sequence[Tuple[Slab, Sequence[Cell]]]
-
-
 def slab_depth(slab: Slab, cells: Sequence[Cell], compact: bool = True) -> int:
-    """Layers the slab takes: its deepest cell, or its own two per step when not compact."""
+    # Layers the slab takes, its deepest cell, or its own two per step when not compact.
     if not compact:
-        return LAYERS_PER_STEP * slab.steps
-    return max((c.depth for c in cells), default=LAYERS_PER_STEP * slab.steps)
+        return constant.LAYERS_PER_STEP * slab.steps
+    return max((cell.depth for cell in cells), default=constant.LAYERS_PER_STEP * slab.steps)
 
 
-def timeline(program: Program, plan: Plan, compact: bool = True) -> Tuple[Dict[int, int], int]:
-    """({step: first layer}, total layers). A step inside a slab maps to the slab's first
-    layer; a step outside every slab keeps its two layers."""
+def timeline(program: Program, plan: Plan, compact: bool = True) -> tuple[dict[int, int], int]:
+    # A step inside a slab maps to the slab's first layer, and a step outside every slab keeps its two layers.
     by_start = {slab.start: (slab, cells) for slab, cells in plan}
-    base, layer, t = {}, 0, 0
-    while t < len(program.steps):
-        if t in by_start:
-            slab, cells = by_start[t]
-            for u in range(slab.start, slab.stop):
-                base[u] = layer
+    base = {}
+    layer = 0
+    step_index = 0
+    while step_index < len(program.steps):
+        if step_index in by_start:
+            slab, cells = by_start[step_index]
+            for covered in range(slab.start, slab.stop):
+                base[covered] = layer
             layer += slab_depth(slab, cells, compact)
-            t = slab.stop
+            step_index = slab.stop
         else:
-            base[t] = layer
-            layer += LAYERS_PER_STEP
-            t += 1
-    return base, layer
+            base[step_index] = layer
+            layer += constant.LAYERS_PER_STEP
+            step_index += 1
+    return base, layer   # {step: first layer}, total layers
 
 
-def lower_cells(program: Program, plan: Plan, compact: bool = True, outline: float = 0.12):
-    """Pipes, cubes, magic cubes and overlays of `program` with the slabs of `plan`
-    replaced by their cells.
-
-    With `compact` every slab is as deep as its deepest cell and everything above moves
-    down; without it the slabs keep their place and a shallow cell leaves its qubits
-    idle above it. Y cubes are drawn pink; `outline` is the alpha of a translucent box
-    around every cell, 0 for none.
-
-    :returns: (pipes, cubes, magic, overlays, layers)
-    """
+def lower_cells(program: Program, plan: Plan, compact: bool = True,
+                outline: float = constant.CELL_OUTLINE) -> tuple[list[_Pipe], list[tuple], list[tuple], list[tuple], int]:
+    # With compact every slab is as deep as its deepest cell, without it a shallow cell leaves its qubits idle above it.
+    stride = constant.GLTF_STRIDE
     base, total = timeline(program, plan, compact)
-    found: Dict[Tuple[tuple, tuple], _Pipe] = {}
-    magic, overlays = set(), []
+    found: dict[tuple[tuple, tuple], _Pipe] = {}
+    magic = set()
+    overlays = []
 
     def cube(tile, layer):
-        return (STRIDE * tile[1], STRIDE * tile[0], STRIDE * layer)
+        return (stride * tile[1], stride * tile[0], stride * layer)
 
-    def put(a, b, parity, hadamard=False, walk=False):
-        lo, hi = min(a, b), max(a, b)
-        if lo[2] < 0 or hi[2] > STRIDE * (total - 1):
+    def put(start, end, parity, hadamard=False, walk=False):
+        low, high = min(start, end), max(start, end)
+        if low[2] < 0 or high[2] > stride * (total - 1):
             return
-        axis = "IJK"[next(x for x in range(3) if lo[x] != hi[x])]
-        found[(lo, hi)] = _Pipe(lo, hi, axis, parity, hadamard=hadamard, walk=walk)
+        axis = "IJK"[next(i for i in range(3) if low[i] != high[i])]
+        found[(low, high)] = _Pipe(low, high, axis, parity, hadamard=hadamard, walk=walk)
 
-    covered = {t for slab, _ in plan for t in range(slab.start, slab.stop)}
+    covered = {step_index for slab, _ in plan for step_index in range(slab.start, slab.stop)}
     steps = program.steps
-    for t, step in enumerate(steps):
-        if t in covered:
+    for step_index, step in enumerate(steps):
+        if step_index in covered:
             continue
-        after = steps[t + 1] if t + 1 < len(steps) else None
-        move = {2 * t: base[t], 2 * t + 1: base[t] + 1, 2 * t + 2: base.get(t + 1, total)}
-        for pipe in _merge_pipes(step, t) + _qubit_pipes(step, t, after):
-            a = pipe.lo[:2] + (STRIDE * move[pipe.lo[2] // STRIDE],)
-            b = pipe.hi[:2] + (STRIDE * move[pipe.hi[2] // STRIDE],)
-            put(a, b, pipe.parity, walk=pipe.walk)
-        for v in step.of_kind(MAGIC):
-            if v.id >= 0:
-                magic.add(cube(v.tile, base[t]))
+        after = steps[step_index + 1] if step_index + 1 < len(steps) else None
+        move = {2 * step_index: base[step_index], 2 * step_index + 1: base[step_index] + 1,
+                2 * step_index + 2: base.get(step_index + 1, total)}
+        for pipe in _merge_pipes(step, step_index) + _qubit_pipes(step, step_index, after):
+            start = pipe.lo[:2] + (stride * move[pipe.lo[2] // stride],)
+            end = pipe.hi[:2] + (stride * move[pipe.hi[2] // stride],)
+            put(start, end, pipe.parity, walk=pipe.walk)
+        for vertex in step.of_kind(MAGIC):
+            if vertex.id >= 0:
+                magic.add(cube(vertex.tile, base[step_index]))
 
-    for n, (slab, cells) in enumerate(plan):
-        first, depth = base[slab.start], slab_depth(slab, cells, compact)
+    for slab_index, (slab, cells) in enumerate(plan):
+        first = base[slab.start]
+        depth = slab_depth(slab, cells, compact)
         seats = steps[slab.start].qubit_tiles()
-        busy = {q for c in cells for q in c.window.participants}
-        for q, tile in seats.items():
-            if q not in busy:
+        busy = {qubit for cell in cells for qubit in cell.window.participants}
+        for qubit, tile in seats.items():
+            if qubit not in busy:
                 for layer in range(first, first + depth):
                     put(cube(tile, layer), cube(tile, layer + 1), 0)
-        for c in cells:
-            box = c.window.box
+
+        for cell in cells:
+            box = cell.window.box
 
             def at(ijk, box=box):
-                return (STRIDE * (box.c0 + ijk[0]), STRIDE * (box.r0 + ijk[1]), STRIDE * (first + ijk[2] - 1))
-            for pipe in c.pipes():
-                step3 = tuple(int(x == pipe.axis) for x in "IJK")
-                put(at(pipe.cube), at(tuple(a + b for a, b in zip(pipe.cube, step3))), pipe.parity, hadamard=pipe.wall)
-            for q in c.window.participants:
-                for layer in range(first + c.depth, first + depth):
-                    put(cube(seats[q], layer), cube(seats[q], layer + 1), 0)
-            for m in c.magic_cubes():
-                magic.add(at(m))
-            for y in c.y_cubes():
-                overlays.append((at(y), at(y), Y_CUBE))
-            if outline > 0:
-                lo = at((0, 0, 1))
-                hi = at((box.width - 1, box.height - 1, c.depth))
-                overlays.append((lo, hi, PALETTE[n % len(PALETTE)] + (outline,)))
+                return (stride * (box.c0 + ijk[0]), stride * (box.r0 + ijk[1]), stride * (first + ijk[2] - 1))
 
-    pipes = sorted(found.values(), key=lambda p: (p.lo, p.hi, p.axis))
-    cubes = {p.lo for p in pipes} | {p.hi for p in pipes}
+            for pipe in cell.pipes():
+                offset = tuple(int(axis == pipe.axis) for axis in "IJK")
+                successor = tuple(coordinate + delta for coordinate, delta in zip(pipe.cube, offset))
+                put(at(pipe.cube), at(successor), pipe.parity, hadamard=pipe.wall)
+            for qubit in cell.window.participants:
+                for layer in range(first + cell.depth, first + depth):
+                    put(cube(seats[qubit], layer), cube(seats[qubit], layer + 1), 0)
+            for magic_cube in cell.magic_cubes():
+                magic.add(at(magic_cube))
+            for y_cube in cell.y_cubes():
+                overlays.append((at(y_cube), at(y_cube), Y_CUBE))
+            if outline > 0:   # a translucent box around the cell, outline being its alpha
+                low = at((0, 0, 1))
+                high = at((box.width - 1, box.height - 1, cell.depth))
+                overlays.append((low, high, PALETTE[slab_index % len(PALETTE)] + (outline,)))
+
+    pipes = sorted(found.values(), key=lambda pipe: (pipe.lo, pipe.hi, pipe.axis))
+    cubes = {pipe.lo for pipe in pipes} | {pipe.hi for pipe in pipes}
     cubes -= magic
-    cubes -= {lo for lo, hi, rgba in overlays if lo == hi}
+    cubes -= {low for low, high, _rgba in overlays if low == high}
     return pipes, sorted(cubes), sorted(magic), overlays, total
 
 
-def write_cells(program: Program, plan: Plan, path, compact: bool = True, outline: float = 0.12) -> int:
-    """Write the program with its slabs replaced by cells; returns the layers it takes."""
+def write_cells(program: Program, plan: Plan, path, compact: bool = True, outline: float = constant.CELL_OUTLINE) -> int:
+    # Returns the layers the scene takes.
     pipes, cubes, magic, overlays, total = lower_cells(program, plan, compact, outline)
     write_scene(path, pipes, cubes, magic, overlays=overlays)
     return total

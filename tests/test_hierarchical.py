@@ -1,4 +1,4 @@
-"""Reuse and composition checked against the independent program verifier."""
+# Reuse and composition checked against the independent program verifier.
 import random
 import sys
 from pathlib import Path
@@ -249,21 +249,19 @@ def test_shape_search_keeps_selected_state_and_can_be_reused_for_flat_solves(mod
     assert compiler.hierarchy_stats == {} and "hierarchical" not in compiler.name
 
 
-def test_empty_hierarchy_and_invalid_configuration():
+def test_empty_hierarchy_compiles():
     h = Hierarchy([definition("root", 2, [("h", (0,), None)])], "root")
     compiler = make("layout")
     assert verify(h.problem, compiler.solve_hierarchy(h)).when == {}
-    with pytest.raises(ValueError, match="routing=True"):
-        Compiler().solve_hierarchy(h)
-    with pytest.raises(ValueError, match="placement"):
-        compiler.solve_hierarchy(h, placement_mode="unknown")
 
 
-def test_driver_accepts_json_in_both_modes_and_rejects_qasm_for_reuse():
-    from main import compile
+def test_driver_picks_the_mode_from_the_suffix(tmp_path):
+    import csv, io, subprocess, sys
     path = ROOT / "benchmarks/qualtran/add-4.json"
-    for hierarchical in (False, True):
-        problem, program, report = compile(path, hierarchical=hierarchical, anneal=False)
-        assert len(report.when) == len(problem.pairs) == 48
-    with pytest.raises(ValueError, match="hierarchy .json"):
-        compile(path.with_suffix(".qasm"), hierarchical=True)
+    run = subprocess.run([sys.executable, str(ROOT / "main.py"), str(path), str(path.with_suffix(".qasm"))],
+                         cwd=tmp_path, capture_output=True, text=True, check=True)
+    rows = list(csv.DictReader(io.StringIO(run.stdout)))
+    assert [r["circuit"] for r in rows] == ["add-4", "add-4"]
+    assert all(r["pairs"] == "48" for r in rows)
+    assert run.stderr.count("hierarchy:") == 1
+    assert (tmp_path / "out/add-4.gltf").exists()

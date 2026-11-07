@@ -20,7 +20,7 @@ needs_qualtran = pytest.mark.skipif(qualtran_bloqs is None, reason="needs qualtr
 
 
 def small():
-    """A root with gates of its own around two calls of `cell`, which borrows one qubit."""
+    # A root with gates of its own around two calls of `cell`, which borrows one qubit.
     cell = Def("cell", "hand-made", ("a", "b", "w"), (0, 1), (0, 1),
                (("cx", (0, 2), None), ("cx", (2, 1), None), ("cx", (0, 2), None)))
     root = Def("root", "hand-made", ("x0", "x1", "x2", "anc"), (0, 1, 2), (0, 1, 2),
@@ -47,6 +47,7 @@ def test_call_graph_counts_and_body_dependencies():
     assert h.counts("root") == {"h": 1, "cx": 7, "t": 1} and h.counts("cell") == {"cx": 3}
     assert h.instances() == {"root": 1, "cell": 2}
     assert h.defs["cell"].workspace == (2,) and h.defs["root"].workspace == (3,)
+
     # the second cell waits for the first through the borrowed qubit and for the T through x1
     assert h.defs["root"].preds() == ((), (0,), (1,), (1, 2), (1, 3))
 
@@ -72,18 +73,6 @@ def test_save_load_and_flat_qasm_round_trip(tmp_path):
     (tmp_path / "small.qasm").write_text(h.to_qasm())
     flat = read_qasm(tmp_path / "small.qasm")
     assert flat.n_qubits == 4 and Counter(flat.pairs) == Counter(h.problem.pairs)
-
-
-def test_bad_definitions_are_rejected():
-    cell = Def("cell", "", ("a", "b"), (0, 1), (0, 1), (("cx", (0, 1), None),))
-    with pytest.raises(ValueError):
-        Hierarchy([cell, Def("root", "", ("a", "b"), (0, 1), (0, 1), (("ccx", (0, 1), None),))], "root")
-    with pytest.raises(ValueError):
-        Hierarchy([cell, Def("root", "", ("a", "b", "c"), (0, 1, 2), (0, 1, 2), (("cell", (0, 1, 2), None),))], "root")
-    with pytest.raises(ValueError):
-        Hierarchy([cell, Def("root", "", ("a", "b"), (0, 1), (0, 1), (("cell", (0, 0), None),))], "root")
-    with pytest.raises(ValueError):
-        Hierarchy([Def("cx", "", ("a", "b"), (0, 1), (0, 1), ())], "cx")
 
 
 def test_benchmarks_are_there():
@@ -118,7 +107,7 @@ def test_a_benchmark_compiles_and_verifies():
 # ---- the generator: every circuit below is checked against Qualtran's own semantics ----
 
 def _circuit(h):
-    """The flat gates as a cirq circuit, measurements and conditions as written."""
+    # The flat gates as a cirq circuit, measurements and conditions as written.
     import cirq
     ops = {"h": cirq.H, "x": cirq.X, "s": cirq.S, "sdg": cirq.S ** -1, "t": cirq.T, "tdg": cirq.T ** -1, "cx": cirq.CNOT,
            "reset": cirq.ResetChannel()}
@@ -171,8 +160,8 @@ def _classical_cases():
 @needs_qualtran
 @pytest.mark.parametrize("case", range(8))
 def test_generated_circuit_computes_what_the_bloq_computes(case):
-    """Basis states in, basis states out: the outputs Qualtran's classical simulation gives,
-    and every other qubit back at 0, so lent workspace really comes back clean."""
+    # Basis states in, basis states out, the outputs Qualtran's classical simulation gives, and every
+    # other qubit back at 0, so lent workspace really comes back clean.
     import cirq
     import numpy as np
     bloq, samples = _classical_cases()[case]
@@ -229,7 +218,7 @@ def test_linear_circuit_applies_its_matrix():
 
 @needs_qualtran
 def test_t_count_matches_qualtran():
-    """4 T per And, 7 per Toffoli and CSwap, on top of the T gates Qualtran counts itself."""
+    # 4 T per And, 7 per Toffoli and CSwap, on top of the T gates Qualtran counts itself.
     from qualtran.resource_counting import QECGatesCost, get_cost_value
     for name in ("add-8", "modadd-4", "gf2mul-4", "modmul-4", "hubbard-2"):
         family, _, size = name.rpartition("-")

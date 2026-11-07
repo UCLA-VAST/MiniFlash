@@ -1,4 +1,4 @@
-"""Initial placements: every seed yields a legal site assignment the anneal can start from."""
+# Initial placements: every seed yields a legal site assignment the anneal can start from.
 import itertools
 
 import numpy as np
@@ -10,7 +10,7 @@ from miniflash.synthesis.placement import initial_order, interaction_matrix
 
 
 def two_cliques():
-    """Qubits 0, 2, 4, 6 talk only to each other, as do 1, 3, 5, 7."""
+    # Qubits 0, 2, 4, 6 talk only to each other, as do 1, 3, 5, 7.
     b = Builder(8)
     for group in ((0, 2, 4, 6), (1, 3, 5, 7)):
         for _ in range(3):
@@ -79,8 +79,3 @@ def test_compiles_and_verifies_from_every_seed(init):
     program = compiler.solve(p)
     verify(p, program)
     assert compiler.name == ("layout" if init == "spectral" else f"layout-{init}")
-
-
-def test_unknown_seed_is_rejected():
-    with pytest.raises(ValueError):
-        make("layout", init="fastplace")

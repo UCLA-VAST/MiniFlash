@@ -22,18 +22,18 @@ with an independent verifier, and renders it as a glTF scene.
 ```bash
 pip install -e '.[test]'
 python -m pytest -q tests
-python main.py benchmarks/algorithms/ghz8.qasm -o ghz8.gltf
+python main.py benchmarks/algorithms/ghz8.qasm
 ```
 
-Open the `.gltf` in any viewer, e.g. <https://gltf-viewer.donmccurdy.com/>. Time
-runs upward, two layers per step. Qubits are red pillars; a CNOT's two halves sit
-on the lower (blue) and upper (red) layer, T merges end at green magic states, and
-walks between partitions are orange.
-
-Several circuits print a CSV, one verified row each:
+Every circuit prints one verified CSV row and leaves `out/<circuit>.gltf`. Open it in
+any viewer, e.g. <https://gltf-viewer.donmccurdy.com/>. Time runs upward, two layers
+per step. Qubits are red pillars; a CNOT's two halves sit on the lower (blue) and upper
+(red) layer, T merges end at green magic states, and walks between partitions are orange.
+A hierarchy `.json` from `benchmarks/qualtran/` compiles bottom-up through its call tree:
 
 ```bash
-python main.py benchmarks/toffoli/*.qasm --solver placement > toffoli.csv
+python main.py benchmarks/toffoli/*.qasm > toffoli.csv
+python main.py benchmarks/qualtran/add-4.json
 ```
 
 As a library:
@@ -47,17 +47,15 @@ report = flash.verify(problem, program)
 flash.write_gltf(program, "tof3.gltf")
 ```
 
-## Options
+## Configuration
 
-- `--solver`: a step of the compiler's ladder, `vanilla`, `dependency`, `routing`,
-  `spacing`, `placement`, `layout` (default). `--shapes N` compares the N smallest
-  site shapes.
-- `--init`: the initial placement the anneal starts from: `spectral` (default),
-  `random`, `gordian`, `gordian-l`, `mincut`, `aplace` or `mpl`.
-- `--factory HxWxT`: magic-state factory, H tiles deep, W wide, one state every T
-  steps, one behind every magic tile. `--factories F`: F shared factories feed the
-  chip through delivery rings instead. Without either, magic supply is unlimited.
-- `--json FILE`: save the tile program.
+Every knob lives in `miniflash/constant.py`, grouped by pass: the solver step and
+layout policy, the magic-state factory (`FACTORY_HEIGHT`, `FACTORY_WIDTH`,
+`FACTORY_PERIOD`, whether the supply is limited and how many factories are shared),
+the initial placement and anneal weights, the router's lane penalty and exact
+frontier, the spacing budget, the lassynth window budget and timeouts, and the
+output directory. `Compiler(...)` and `flash.make(name, **options)` take the same
+knobs as keyword arguments for one call.
 
 `benchmarks/` holds 206 circuits (GHZ, BV, DJ, QFT, random Clifford, graph states,
 Galois-field multipliers, Toffoli, ...); see `benchmarks/README.md`.

@@ -1,26 +1,23 @@
-"""Program: the solver's output, one sparse step graph per time step.
-
-Each step lists the non-free tiles as vertices (coordinate, kind, id) and the
-merges between them as undirected edges. Kinds are QUBIT (id = qubit index),
-MAGIC (id = consuming pair, or -1 when idle), and ROUTE (id = pair). A pair that
-executes at a step is the connected component holding its parties. Free tiles are
-absent. Volume is steps x height x width.
-"""
+# Program: the solver's output, one sparse step graph per time step. Each step lists the non-free tiles as
+# vertices (coordinate, kind, id) and the merges between them as undirected edges. Kinds are QUBIT with the
+# qubit index, MAGIC with the consuming pair or IDLE, and ROUTE with the pair. A pair that executes at a step
+# is the connected component holding its parties, and volume is steps x height x width.
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Sequence, Set
+from typing import Sequence
 
 from .circuit import Problem
 from .mapping import Coord, Mapping
 from .route import Route, check_route
 
-QUBIT, MAGIC, ROUTE = "qubit", "magic", "route"
-KINDS = (QUBIT, MAGIC, ROUTE)
+QUBIT = "qubit"
+MAGIC = "magic"
+ROUTE = "route"
 IDLE = -1
-Edge = FrozenSet[Coord]
+Edge = frozenset[Coord]
 
 
 @dataclass(frozen=True)
@@ -31,60 +28,56 @@ class Vertex:
 
     def __post_init__(self):
         object.__setattr__(self, "tile", tuple(self.tile))
-        if self.kind not in KINDS:
-            raise ValueError(f"unknown vertex kind {self.kind}")
 
 
 @dataclass
 class Step:
-    vertices: Dict[Coord, Vertex] = field(default_factory=dict)
-    edges: Set[Edge] = field(default_factory=set)
+    vertices: dict[Coord, Vertex] = field(default_factory=dict)
+    edges: set[Edge] = field(default_factory=set)
 
     def add(self, tile: Coord, kind: str, id: int) -> Vertex:
         tile = tuple(tile)
-        if tile in self.vertices:
-            raise ValueError(f"tile {tile} already holds {self.vertices[tile]}")
-        v = Vertex(tile, kind, id)
-        self.vertices[tile] = v
-        return v
+        vertex = Vertex(tile, kind, id)
+        self.vertices[tile] = vertex
+        return vertex
 
-    def link(self, a: Coord, b: Coord) -> None:
-        a, b = tuple(a), tuple(b)
-        if a not in self.vertices or b not in self.vertices:
-            raise ValueError(f"edge {a}-{b} touches a free tile")
-        self.edges.add(frozenset((a, b)))
+    def link(self, tile_a: Coord, tile_b: Coord) -> None:
+        tile_a = tuple(tile_a)
+        tile_b = tuple(tile_b)
+        self.edges.add(frozenset((tile_a, tile_b)))
 
-    def of_kind(self, kind: str) -> List[Vertex]:
-        return [v for v in self.vertices.values() if v.kind == kind]
+    def of_kind(self, kind: str) -> list[Vertex]:
+        return [vertex for vertex in self.vertices.values() if vertex.kind == kind]
 
-    def qubit_tiles(self) -> Dict[int, Coord]:
-        return {v.id: v.tile for v in self.vertices.values() if v.kind == QUBIT}
+    def qubit_tiles(self) -> dict[int, Coord]:
+        return {vertex.id: vertex.tile for vertex in self.vertices.values() if vertex.kind == QUBIT}
 
-    def neighbours(self) -> Dict[Coord, Set[Coord]]:
-        adj: Dict[Coord, Set[Coord]] = {t: set() for t in self.vertices}
-        for e in self.edges:
-            a, b = tuple(e)
-            adj[a].add(b)
-            adj[b].add(a)
-        return adj
+    def neighbours(self) -> dict[Coord, set[Coord]]:
+        neighbours: dict[Coord, set[Coord]] = {tile: set() for tile in self.vertices}
+        for edge in self.edges:
+            tile_a, tile_b = tuple(edge)
+            neighbours[tile_a].add(tile_b)
+            neighbours[tile_b].add(tile_a)
+        return neighbours
 
-    def components(self) -> List[FrozenSet[Coord]]:
-        """Connected components with at least one edge, as tile sets."""
-        adj = self.neighbours()
-        seen: Set[Coord] = set()
+    def components(self) -> list[frozenset[Coord]]:
+        # Connected components with at least one edge, as tile sets.
+        neighbours = self.neighbours()
+        seen: set[Coord] = set()
         out = []
-        for t in self.vertices:
-            if t in seen or not adj[t]:
+        for tile in self.vertices:
+            if tile in seen or not neighbours[tile]:
                 continue
-            comp, stack = set(), [t]
+            component = set()
+            stack = [tile]
             while stack:
-                u = stack.pop()
-                if u in comp:
+                current = stack.pop()
+                if current in component:
                     continue
-                comp.add(u)
-                stack.extend(adj[u] - comp)
-            seen |= comp
-            out.append(frozenset(comp))
+                component.add(current)
+                stack.extend(neighbours[current] - component)
+            seen |= component
+            out.append(frozenset(component))
         return out
 
     @property
@@ -92,25 +85,25 @@ class Step:
         return not self.edges
 
     def to_dict(self) -> dict:
-        return {"vertices": [[v.tile[0], v.tile[1], v.kind, v.id]
-                             for v in sorted(self.vertices.values(), key=lambda v: v.tile)],
-                "edges": sorted([sorted(e) for e in self.edges])}
+        return {"vertices": [[vertex.tile[0], vertex.tile[1], vertex.kind, vertex.id]
+                             for vertex in sorted(self.vertices.values(), key=lambda vertex: vertex.tile)],
+                "edges": sorted([sorted(edge) for edge in self.edges])}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Step":
-        s = cls()
-        for r, c, kind, id in d["vertices"]:
-            s.add((r, c), kind, id)
-        for a, b in d["edges"]:
-            s.link(tuple(a), tuple(b))
-        return s
+    def from_dict(cls, data: dict) -> Step:
+        step = cls()
+        for row, col, kind, id in data["vertices"]:
+            step.add((row, col), kind, id)
+        for tile_a, tile_b in data["edges"]:
+            step.link(tuple(tile_a), tuple(tile_b))
+        return step
 
 
 @dataclass
 class Program:
     height: int
     width: int
-    steps: List[Step] = field(default_factory=list)
+    steps: list[Step] = field(default_factory=list)
 
     @property
     def area(self) -> int:
@@ -124,20 +117,18 @@ class Program:
         return len(self.steps)
 
     @classmethod
-    def from_routes(cls, problem: Problem, mapping: Mapping, schedule: Sequence[Sequence[Route]]) -> "Program":
-        """Derive the program from a static mapping and one route list per step.
-
-        Every route is checked against its pair and the mapping. Edges follow the
-        route: Z party -> first tile -> ... -> last tile -> X party or magic tile.
-        """
+    def from_routes(cls, problem: Problem, mapping: Mapping, schedule: Sequence[Sequence[Route]]) -> Program:
+        # Every route is checked against its pair and the mapping, and its edges run from the Z party along the
+        # tiles to the X party or the magic tile.
         prog = cls(mapping.height, mapping.width)
         for routes in schedule:
             step = Step()
-            for q, tile in mapping.qubits.items():
-                step.add(tile, QUBIT, q)
-            consumed = {r.magic: r.pair for r in routes if r.magic is not None}
-            for m in mapping.magic:
-                step.add(m, MAGIC, consumed.get(m, IDLE))
+            for qubit, tile in mapping.qubits.items():
+                step.add(tile, QUBIT, qubit)
+            consumed = {route.magic: route.pair for route in routes if route.magic is not None}
+            for magic_tile in mapping.magic:
+                step.add(magic_tile, MAGIC, consumed.get(magic_tile, IDLE))
+
             for route in routes:
                 pair = problem.pairs[route.pair]
                 check_route(route, pair, mapping)
@@ -145,22 +136,22 @@ class Program:
                 for tile in tiles:
                     step.add(tile, ROUTE, route.pair)
                 step.link(mapping.qubits[pair.z], tiles[0])
-                for a, b in zip(tiles, tiles[1:]):
-                    step.link(a, b)
+                for tile_a, tile_b in zip(tiles, tiles[1:]):
+                    step.link(tile_a, tile_b)
                 step.link(tiles[-1], route.magic if pair.is_magic else mapping.qubits[pair.x])
             prog.steps.append(step)
         return prog
 
     def to_dict(self) -> dict:
-        return {"height": self.height, "width": self.width, "steps": [s.to_dict() for s in self.steps]}
+        return {"height": self.height, "width": self.width, "steps": [step.to_dict() for step in self.steps]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Program":
-        return cls(d["height"], d["width"], [Step.from_dict(s) for s in d["steps"]])
+    def from_dict(cls, data: dict) -> Program:
+        return cls(data["height"], data["width"], [Step.from_dict(step) for step in data["steps"]])
 
     def save(self, path) -> None:
         Path(path).write_text(json.dumps(self.to_dict()))
 
     @classmethod
-    def load(cls, path) -> "Program":
+    def load(cls, path) -> Program:
         return cls.from_dict(json.loads(Path(path).read_text()))

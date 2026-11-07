@@ -1,54 +1,47 @@
-"""Layout selection: choose the site array's shape ("+ Layout").
-
-`candidate_shapes` lists every a x b site array with a <= b that holds the qubits,
-ordered by the paired-lane grid area; Compiler(layout=N) tries the first N of them
-(main's rule) plus the squarest feasible shape if it is not among them: the
-budgeted router wants routing space, and the flat shapes that minimise area are
-the ones it handles worst. Each shape is compiled from scratch and the cheapest
-program is kept; `tried` records every candidate. Magic supply always sits at both
-row ends. The statistics policy (Compiler(layout="stats")) uses `shape_estimates`
-to price full grid area and layer capacity, then compiles only its preferred
-shape. Predictions do not include compaction or walks.
-"""
+# Layout selection: the shape of the site array. candidate_shapes lists every a x b array with a <= b that holds
+# the qubits, by paired-lane grid area, and the compiler tries the first N plus the squarest feasible shape,
+# since the flat shapes that minimise area are the ones the budgeted router handles worst. shape_estimates prices
+# each row count by full grid area times the layer capacity, a step carrying two T gates and LAYOUT_CX_PER_ROW
+# CX pairs per site row, so the statistics policy compiles only its preferred shape. Predictions ignore routes,
+# compaction and walks.
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from ..circuit import Problem
+from ..constant import LAYOUT_CX_PER_ROW
 from ..mapping import Mapping
 
-Shape = Tuple[int, int]
+Shape = tuple[int, int]
 
 
-def candidate_shapes(n_qubits: int, count: Optional[int] = None, squarest: bool = False) -> List[Shape]:
-    """(site_rows, site_cols) with rows <= cols, smallest paired-lane grid area first.
-    With `squarest`, the shape with the smallest cols - rows is appended if the first
-    `count` do not already contain it."""
-    cands = []
-    for a in range(1, n_qubits + 1):
-        b = -(-n_qubits // a)
-        if a > b:
+def candidate_shapes(n_qubits: int, count: Optional[int] = None, squarest: bool = False) -> list[Shape]:
+    # (site_rows, site_cols) with rows <= cols, smallest paired-lane grid area first.
+    by_area = []
+    for rows in range(1, n_qubits + 1):
+        cols = -(-n_qubits // rows)
+        if rows > cols:
             break
-        m = Mapping.paired(a, b, n_qubits)
-        cands.append((m.height * m.width, a, b))
-    cands.sort()
-    out = [(a, b) for _, a, b in cands]
+        mapping = Mapping.paired(rows, cols, n_qubits)
+        by_area.append((mapping.height * mapping.width, rows, cols))
+    by_area.sort()
+    shapes = [(rows, cols) for _, rows, cols in by_area]
     if count is None:
-        return out
-    chosen = out[:count]
+        return shapes
+
+    chosen = shapes[:count]
     if squarest:
-        sq = min(out, key=lambda ab: (ab[1] - ab[0], ab))
-        if sq not in chosen:
-            chosen.append(sq)
+        squarest_shape = min(shapes, key=lambda shape: (shape[1] - shape[0], shape))
+        if squarest_shape not in chosen:
+            chosen.append(squarest_shape)
     return chosen
 
 
+# A prediction of the shape model, not a routed or verified program.
 @dataclass(frozen=True)
 class ShapeEstimate:
-    """A shape-model prediction, not a routed or verified program."""
-
     shape: Shape
     area: int
     steps: int
@@ -58,16 +51,11 @@ class ShapeEstimate:
         return self.area * self.steps
 
 
-def shape_estimates(problem: Problem, cap: float = 1.0) -> List[ShapeEstimate]:
-    """Price each row count by full paired-grid area times estimated layer duration.
-
-    A layer needs at least one step, with capacity of two T gates and ``cap`` CX
-    pairs per site row. The model ignores actual routes, compaction, and walks.
-    Row counts range from one through ceil(sqrt(n_qubits)).
-    """
+def shape_estimates(problem: Problem, cap: float = LAYOUT_CX_PER_ROW) -> list[ShapeEstimate]:
+    # Row counts run from one through ceil(sqrt(n_qubits)), and a layer needs at least one step.
     demand = []
     for layer in problem.layers():
-        magic_pairs = sum(problem.pairs[i].is_magic for i in layer)
+        magic_pairs = sum(problem.pairs[pair_id].is_magic for pair_id in layer)
         demand.append((magic_pairs, len(layer) - magic_pairs))
 
     estimates = []
@@ -82,6 +70,6 @@ def shape_estimates(problem: Problem, cap: float = 1.0) -> List[ShapeEstimate]:
     return estimates
 
 
-def stats_shape(problem: Problem, cap: float = 1.0) -> Shape:
-    """Choose the smallest predicted volume; ties prefer fewer site rows."""
+def stats_shape(problem: Problem, cap: float = LAYOUT_CX_PER_ROW) -> Shape:
+    # The smallest predicted volume, fewer site rows on ties.
     return min(shape_estimates(problem, cap), key=lambda estimate: (estimate.volume, estimate.shape[0])).shape

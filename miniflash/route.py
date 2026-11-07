@@ -1,20 +1,15 @@
-"""Route: the second intermediate object, one per pair per step, and the candidate search.
-
-A route is a chain of straight segments through free tiles. Consecutive segments
-share their corner tile: segment i ends where segment i+1 starts. A straight route
-has one segment and an L has two. The shared search also tries three-segment
-detours. The qubit tiles are never part of the route: the first tile must be a vertical neighbour of
-the Z party and the last tile a horizontal neighbour of the X party, which is a
-qubit or the consumed magic tile. A magic tile attaches from any side.
-`free_routes` enumerates the straight, L, and three-segment routes between two
-parties' sides; `shortest_route` and `shortest_magic_route` pick the shortest.
-"""
+# Route: the second intermediate object, one per pair per step, and the candidate search. A route is a chain
+# of straight segments through free tiles, consecutive segments sharing their corner tile, so a straight route
+# has one segment, an L two, and a detour three. The qubit tiles are never part of the route: the first tile
+# is a vertical neighbour of the Z party and the last a horizontal neighbour of the X party, which is a qubit
+# or the consumed magic tile, and a magic tile attaches from any side.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
-from .circuit import Pair, Problem
+from . import constant
+from .circuit import Pair
 from .mapping import Coord, Mapping
 
 
@@ -37,20 +32,20 @@ class Segment:
     def length(self) -> int:
         return abs(self.end[0] - self.start[0]) + abs(self.end[1] - self.start[1]) + 1
 
-    def tiles(self) -> List[Coord]:
-        (r0, c0), (r1, c1) = self.start, self.end
-        if r0 == r1:
-            step = 1 if c1 >= c0 else -1
-            return [(r0, c) for c in range(c0, c1 + step, step)]
-        step = 1 if r1 >= r0 else -1
-        return [(r, c0) for r in range(r0, r1 + step, step)]
+    def tiles(self) -> list[Coord]:
+        (row0, col0), (row1, col1) = self.start, self.end
+        if row0 == row1:
+            direction = 1 if col1 >= col0 else -1
+            return [(row0, col) for col in range(col0, col1 + direction, direction)]
+        direction = 1 if row1 >= row0 else -1
+        return [(row, col0) for row in range(row0, row1 + direction, direction)]
 
 
 @dataclass(frozen=True)
 class Route:
     pair: int
-    segments: Tuple[Segment, ...]
-    magic: Optional[Coord] = None  # the magic tile consumed, for (q, MAGIC) pairs
+    segments: tuple[Segment, ...]
+    magic: Optional[Coord] = None   # the magic tile consumed, for (q, MAGIC) pairs
 
     def __post_init__(self):
         object.__setattr__(self, "segments", tuple(self.segments))
@@ -58,9 +53,9 @@ class Route:
             object.__setattr__(self, "magic", tuple(self.magic))
         if not self.segments:
             raise RouteError(f"route for pair {self.pair} has no segments")
-        for a, b in zip(self.segments, self.segments[1:]):
-            if a.end != b.start:
-                raise RouteError(f"route for pair {self.pair}: segment ends at {a.end}, next starts at {b.start}")
+        for segment, following in zip(self.segments, self.segments[1:]):
+            if segment.end != following.start:
+                raise RouteError(f"route for pair {self.pair}: segment ends at {segment.end}, next starts at {following.start}")
 
     @property
     def start(self) -> Coord:
@@ -70,11 +65,11 @@ class Route:
     def end(self) -> Coord:
         return self.segments[-1].end
 
-    def tiles(self) -> List[Coord]:
-        """Tiles in walking order, the shared corner listed once."""
+    def tiles(self) -> list[Coord]:
+        # Tiles in walking order, the shared corner listed once.
         out = list(self.segments[0].tiles())
-        for s in self.segments[1:]:
-            out.extend(s.tiles()[1:])
+        for segment in self.segments[1:]:
+            out.extend(segment.tiles()[1:])
         return out
 
     @property
@@ -83,15 +78,15 @@ class Route:
 
 
 def check_route(route: Route, pair: Pair, mapping: Mapping) -> None:
-    """Raise RouteError unless `route` legally realises `pair` on `mapping`."""
     tiles = route.tiles()
     if len(set(tiles)) != len(tiles):
         raise RouteError(f"pair {route.pair}: route revisits a tile")
-    for t in tiles:
-        if not mapping.is_free(t):
-            raise RouteError(f"pair {route.pair}: tile {t} is not a free tile")
+    for tile in tiles:
+        if not mapping.is_free(tile):
+            raise RouteError(f"pair {route.pair}: tile {tile} is not a free tile")
     if route.start not in mapping.z_side(pair.z):
         raise RouteError(f"pair {route.pair}: start {route.start} is not on the Z side of q{pair.z} at {mapping.qubits[pair.z]}")
+
     if pair.is_magic:
         if route.magic is None:
             raise RouteError(f"pair {route.pair}: T route names no magic tile")
@@ -106,114 +101,115 @@ def check_route(route: Route, pair: Pair, mapping: Mapping) -> None:
             raise RouteError(f"pair {route.pair}: end {route.end} is not on the X side of q{pair.x} at {mapping.qubits[pair.x]}")
 
 
-def segments_of(tiles: Sequence[Coord]) -> Tuple[Segment, ...]:
-    """Straight segments of a tile path, one per maximal straight run."""
+def segments_of(tiles: Sequence[Coord]) -> tuple[Segment, ...]:
+    # One segment per maximal straight run of the path.
     if not tiles:
         raise RouteError("empty path")
-    segs = []
+    segments = []
     start = tiles[0]
-    for a, b, c in zip(tiles, tiles[1:], tiles[2:]):
-        if (b[0] - a[0], b[1] - a[1]) != (c[0] - b[0], c[1] - b[1]):
-            segs.append(Segment(start, b))
-            start = b
-    segs.append(Segment(start, tiles[-1]))
-    return tuple(segs)
+    for previous, current, following in zip(tiles, tiles[1:], tiles[2:]):
+        if (current[0] - previous[0], current[1] - previous[1]) != (following[0] - current[0], following[1] - current[1]):
+            segments.append(Segment(start, current))
+            start = current
+    segments.append(Segment(start, tiles[-1]))
+    return tuple(segments)
 
 
-def l_routes(start: Coord, end: Coord) -> List[Tuple[Segment, ...]]:
-    """The straight or two L segment chains from start to end (row-first, then column-first)."""
-    (r0, c0), (r1, c1) = start, end
-    if r0 == r1 or c0 == c1:
+def l_routes(start: Coord, end: Coord) -> list[tuple[Segment, ...]]:
+    # The straight chain, or the row-first and the column-first L.
+    (row0, col0), (row1, col1) = start, end
+    if row0 == row1 or col0 == col1:
         return [(Segment(start, end),)]
-    return [(Segment(start, (r0, c1)), Segment((r0, c1), end)),
-            (Segment(start, (r1, c0)), Segment((r1, c0), end))]
+    return [(Segment(start, (row0, col1)), Segment((row0, col1), end)),
+            (Segment(start, (row1, col0)), Segment((row1, col0), end))]
 
 
-Schedule = List[List[Route]]
+Schedule = list[list[Route]]
 
 
 def free_routes(pair_id: int, starts: Sequence[Coord], ends: Sequence[Coord], mapping: Mapping,
-                magic: Optional[Coord] = None, blocked: Sequence[Coord] = (), connectors: int = 3) -> List[Route]:
-    """Generate free straight, L, and limited three-segment routes from `starts` to
-    `ends`. Three-segment routes run start line -> connecting line -> end line through a
-    connecting column (row -> column -> row) or row, tried only for start/end pairs that
-    no straight or L route joins; the `connectors` nearest lines that give a free route
-    are kept, nearest meaning inside the span between start and end first, then by
-    distance from it. This covers parallel lines and a shared line whose direct segment
-    is blocked (a U-turn)."""
+                magic: Optional[Coord] = None, blocked: Sequence[Coord] = (),
+                connectors: int = constant.ROUTE_CONNECTORS) -> list[Route]:
+    # Three-segment routes are tried only for a start and end that no straight or L route joins, and the
+    # connectors nearest lines that give a free route are kept, lines inside the span between start and end first.
     blocked = set(blocked)
     out = []
 
     def free(tiles):
-        return all(mapping.is_free(t) and t not in blocked for t in tiles)
+        return all(mapping.is_free(tile) and tile not in blocked for tile in tiles)
 
-    for st in starts:
-        if not mapping.is_free(st) or st in blocked:
+    def segment_tiles(segments):
+        return [tile for segment in segments for tile in segment.tiles()]
+
+    for start in starts:
+        if not mapping.is_free(start) or start in blocked:
             continue
-        for en in ends:
-            if not mapping.is_free(en) or en in blocked:
+        for end in ends:
+            if not mapping.is_free(end) or end in blocked:
                 continue
             direct = 0
-            for segs in l_routes(st, en):
-                if free([t for seg in segs for t in seg.tiles()]):
-                    out.append(Route(pair_id, segs, magic))
+            for segments in l_routes(start, end):
+                if free(segment_tiles(segments)):
+                    out.append(Route(pair_id, segments, magic))
                     direct += 1
             if direct:
                 continue
-            # no straight or L route: row -> column -> row via a connecting column c, and
-            # column -> row -> column via a row r; on a shared line this is the U-turn
-            lo, hi = sorted((st[1], en[1]))
+
+            # Row, column, row through a connecting column, which on a shared line is the U-turn.
+            low, high = sorted((start[1], end[1]))
             found = 0
-            for c in sorted(range(mapping.width), key=lambda c: (0 if lo < c < hi else min(abs(c - lo), abs(c - hi)), c)):
-                if c in (st[1], en[1]):
+            for col in sorted(range(mapping.width),
+                              key=lambda col: (0 if low < col < high else min(abs(col - low), abs(col - high)), col)):
+                if col in (start[1], end[1]):
                     continue
-                segs = (Segment(st, (st[0], c)), Segment((st[0], c), (en[0], c)), Segment((en[0], c), en))
-                if free([t for seg in segs for t in seg.tiles()]):
-                    out.append(Route(pair_id, segs, magic))
+                segments = (Segment(start, (start[0], col)), Segment((start[0], col), (end[0], col)), Segment((end[0], col), end))
+                if free(segment_tiles(segments)):
+                    out.append(Route(pair_id, segments, magic))
                     found += 1
                     if found == connectors:
                         break
-            lo, hi = sorted((st[0], en[0]))
+
+            # Column, row, column through a connecting row.
+            low, high = sorted((start[0], end[0]))
             found = 0
-            for r in sorted(range(mapping.height), key=lambda r: (0 if lo < r < hi else min(abs(r - lo), abs(r - hi)), r)):
-                if r in (st[0], en[0]):
+            for row in sorted(range(mapping.height),
+                              key=lambda row: (0 if low < row < high else min(abs(row - low), abs(row - high)), row)):
+                if row in (start[0], end[0]):
                     continue
-                segs = (Segment(st, (r, st[1])), Segment((r, st[1]), (r, en[1])), Segment((r, en[1]), en))
-                if free([t for seg in segs for t in seg.tiles()]):
-                    out.append(Route(pair_id, segs, magic))
+                segments = (Segment(start, (row, start[1])), Segment((row, start[1]), (row, end[1])), Segment((row, end[1]), end))
+                if free(segment_tiles(segments)):
+                    out.append(Route(pair_id, segments, magic))
                     found += 1
                     if found == connectors:
                         break
     return out
 
 
-def shortest_route(pair_id: int, z: int, x: int, mapping: Mapping, blocked: Sequence[Coord] = ()) -> Optional[Route]:
-    """Shortest free route from qubit z's Z side to qubit x's X side,
-    or None; ties keep enumeration order."""
+def shortest_route(pair_id: int, z_qubit: int, x_qubit: int, mapping: Mapping, blocked: Sequence[Coord] = ()) -> Optional[Route]:
+    # Ties keep enumeration order.
     best = None
-    for cand in free_routes(pair_id, mapping.z_side(z), mapping.x_side(x), mapping, blocked=blocked):
-        if best is None or cand.length < best.length:
-            best = cand
+    for candidate in free_routes(pair_id, mapping.z_side(z_qubit), mapping.x_side(x_qubit), mapping, blocked=blocked):
+        if best is None or candidate.length < best.length:
+            best = candidate
     return best
 
 
-def shortest_magic_route(pair_id: int, z: int, mapping: Mapping, blocked: Sequence[Coord] = (),
+def shortest_magic_route(pair_id: int, z_qubit: int, mapping: Mapping, blocked: Sequence[Coord] = (),
                          consumed: Sequence[Coord] = ()) -> Optional[Route]:
-    """Shortest free route from qubit z's Z side to any side of a magic tile not in
-    `consumed`. Magic tiles are tried by distance and the search stops once no closer
-    tile can beat the best route found."""
-    z_tile = mapping.qubits[z]
+    # Magic tiles not in consumed are tried by distance, and the search stops once no closer tile can beat the best.
+    z_tile = mapping.qubits[z_qubit]
 
-    def dist(m):
-        return abs(m[0] - z_tile[0]) + abs(m[1] - z_tile[1])
+    def distance(magic):
+        return abs(magic[0] - z_tile[0]) + abs(magic[1] - z_tile[1])
+
     consumed = set(consumed)
     best = None
-    for m in sorted(mapping.magic, key=lambda m: (dist(m), m)):
-        if best is not None and dist(m) - 1 >= best.length:
+    for magic in sorted(mapping.magic, key=lambda magic: (distance(magic), magic)):
+        if best is not None and distance(magic) - 1 >= best.length:
             break
-        if m in consumed:
+        if magic in consumed:
             continue
-        for cand in free_routes(pair_id, mapping.z_side(z), mapping.magic_side(m), mapping, magic=m, blocked=blocked):
-            if best is None or cand.length < best.length:
-                best = cand
+        for candidate in free_routes(pair_id, mapping.z_side(z_qubit), mapping.magic_side(magic), mapping, magic=magic, blocked=blocked):
+            if best is None or candidate.length < best.length:
+                best = candidate
     return best
