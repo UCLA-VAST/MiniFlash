@@ -1,68 +1,79 @@
 <p align="center">
-  <img src="docs/logo.svg" width="120" alt="miniflash logo">
+  <img src="docs/logo.svg" width="128" height="128" alt="MiniFlash logo">
 </p>
 
 <h1 align="center">MiniFlash</h1>
 
-<p align="center"><b>A <i>mini</i> and <i>fast</i> Clifford+T &rarr; lattice-surgery compiler.</b></p>
+<p align="center"><b>An <i>ultra fast</i> Clifford+T &rarr; lattice-surgery compiler.</b></p>
 
 <p align="center">
-  <a href="https://miniflash.readthedocs.io"><img src="https://readthedocs.org/projects/miniflash/badge/?version=latest" alt="documentation"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2626d9.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-d92626.svg" alt="python 3.9+">
   <img src="https://img.shields.io/badge/pure-Python-26bf40.svg" alt="pure python">
 </p>
 
-MiniFlash turns a Clifford+T circuit (OpenQASM 2.0) into a
-fault-tolerant **lattice-surgery layout**: the explicit 3-D spacetime
-volume that a surface-code quantum computer would execute, with logical
-qubits traced as pipes and every surgery, Hadamard and magic-state
-injection placed. The result is a self-contained glTF scene — open it
-in any 3-D viewer. Cell synthesis is
-[LaSsynth](https://arxiv.org/abs/2404.18369) (Tan, Niu, Gidney — ISCA
-2024). Read the [full documentation](https://miniflash.readthedocs.io).
+MiniFlash turns an OpenQASM 2.0 circuit into a **tile program**: which tiles hold
+qubits, magic states and routes, and which tiles merge at each step. It minimizes
+spacetime volume (height × width × steps, walks included), checks every program
+with an independent verifier, and renders it as a glTF scene.
 
 ## Quickstart
 
 ```bash
-pip install -e .
-python scripts/download_lassynth.py     # fetch LaSsynth from its Zenodo artifact (sha256-pinned)
-python main.py benchmarks/algorithms/ghz8.qasm -o ghz8.gltf
-# open in any glTF viewer, e.g. https://gltf-viewer.donmccurdy.com/
+pip install -e '.[test]'
+python -m pytest -q tests
+python main.py benchmarks/algorithms/ghz8.qasm
 ```
 
-Partitioning is coarse-first: regions start at whole-circuit granularity
-and split in place whenever a region exhausts its per-region SAT budget
-(`--engine sat`, budget via `--budget`, default 600 s; the default engine
-serves cached cells and packs the rest without a solver). Compilation starts cold and warms the cell
-cache as it goes; optionally pre-warm it from the published archive
-(`cache-v1` release, sha256-pinned):
+Every circuit prints one verified CSV row and leaves `out/<circuit>.gltf`. Open it in
+any viewer, e.g. <https://gltf-viewer.donmccurdy.com/>. Time runs upward, two layers
+per step. Qubits are red pillars; a CNOT's two halves sit on the lower (blue) and upper
+(red) layer, T merges end at green magic states, and walks between partitions are orange.
+A hierarchy `.json` from `benchmarks/qualtran/` compiles bottom-up through its call tree:
 
 ```bash
-python scripts/download_cache.py
+python main.py benchmarks/toffoli/*.qasm > toffoli.csv
+python main.py benchmarks/qualtran/add-4.json
 ```
 
-SAT solving uses
-[kissat](https://github.com/arminbiere/kissat) when available — build it
-and point `MINIFLASH_KISSAT_DIR` at the directory holding the `kissat`
-binary — and falls back to z3 otherwise. `benchmarks/` ships 175
-circuits to try (ghz/bv/dj, random Clifford, graph states, gf-mult,
-Toffoli, ...).
-
-As a library — the pipeline runs to the **Program IR**, and the
-package's own backend renders it:
+As a library:
 
 ```python
 import miniflash as flash
 
-circuit = flash.parse("circuit.qasm")
-pc = flash.partition(circuit)          # PartitionedCircuit: .regions / .events / .to_text() / .save_png()
-floorplan, cells, channels = flash.synthesize(pc)
-program = flash.elaborate(floorplan, cells, events=pc.events, channels=channels)
-
-stats = program.stats()                             # check -> measure
-flash.write_gltf(program, "layout.gltf")
-
-import json
-json.dump(program.stats(), open("stats.json", "w"), indent=2)   # volumes, pauli frames, T corrections
+problem = flash.read_qasm("benchmarks/toffoli/tof-3.qasm")
+program = flash.make("layout").solve(problem)
+report = flash.verify(problem, program)
+flash.write_gltf(program, "tof3.gltf")
 ```
+
+## Configuration
+
+Every knob lives in `miniflash/constant.py`, grouped by pass: the solver step and
+layout policy, the magic-state factory (`FACTORY_HEIGHT`, `FACTORY_WIDTH`,
+`FACTORY_PERIOD`, whether the supply is limited and how many factories are shared),
+the initial placement and anneal weights, the router's lane penalty and exact
+frontier, the spacing budget, the lassynth window budget and timeouts, and the
+output directory. `Compiler(...)` and `flash.make(name, **options)` take the same
+knobs as keyword arguments for one call.
+
+`benchmarks/` holds 206 circuits (GHZ, BV, DJ, QFT, random Clifford, graph states,
+Galois-field multipliers, Toffoli, ...); see `benchmarks/README.md`.
+
+## Citation
+
+If you use MiniFlash in your research, please cite:
+
+```bibtex
+@article{wang2026miniflash,
+  title   = {Demand-Driven Routing Space for Lattice-Surgery Compilation},
+  author  = {Wang, Hanyu and Lin, Wan-Hsuan and Chen, Zihan and Zhang, Eddy Z. and Cong, Jason},
+  journal = {arXiv preprint arXiv:2610.30747},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2610.30747}
+}
+```
+
+## License
+
+MIT

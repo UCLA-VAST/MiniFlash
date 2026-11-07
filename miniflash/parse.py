@@ -1,26 +1,15 @@
-"""Circuit ingestion.
+# Circuit ingestion. Reads OpenQASM 2 and normalizes it to the accepted Clifford+T gate set: h, cx, x, s,
+# sdg, t, tdg, measure and barrier pass through, while z, y, cz, swap, id, rz at quarter turns and ccx are
+# expanded in place. A gate outside this set raises ValueError, so nothing is silently dropped.
+from __future__ import annotations
 
-Reads OpenQASM 2.0 (or a qiskit ``QuantumCircuit``) and normalizes it to
-the accepted Clifford+T gate set: ``h``, ``cx``, ``x``, ``s``, ``sdg``,
-``t``, ``tdg``, ``measure`` and ``barrier`` pass through unchanged, while
-``z``, ``y``, ``cz``, ``swap``, ``id``, ``rz`` at quarter turns and
-``ccx`` (standard 7-T decomposition) are expanded in place. A gate
-outside this set raises ``ValueError`` — nothing is silently dropped.
-
-Example::
-
-    import miniflash as flash
-
-    circuit = flash.parse("benchmarks/algorithms/ghz8.qasm")
-"""
 import math
+from typing import Optional
 
 from qiskit import qasm2
 from qiskit.circuit import QuantumCircuit
 
 ACCEPTED_GATES = ("h", "cx", "x", "s", "sdg", "t", "tdg", "measure", "barrier")
-CLIFFORD_GATES = ("h", "cx", "x", "s", "sdg")
-
 
 _EXPANSIONS = {
     "id": (),
@@ -39,7 +28,7 @@ _RZ_QUARTER_TURNS = {
 }
 
 
-def _rz_replacement(operation):
+def _rz_replacement(operation) -> Optional[tuple]:
     angle = float(operation.params[0])
     steps = round(angle / (math.pi / 2))
     if abs(angle - steps * math.pi / 2) > 1e-9:
@@ -50,6 +39,7 @@ def _rz_replacement(operation):
 def _expand_gates(circuit: QuantumCircuit) -> QuantumCircuit:
     if all(instruction.operation.name not in _EXPANSIONS and instruction.operation.name != "rz" for instruction in circuit.data):
         return circuit
+
     expanded = QuantumCircuit(*circuit.qregs, *circuit.cregs)
     for instruction in circuit.data:
         if instruction.operation.name == "rz":
@@ -65,18 +55,16 @@ def _expand_gates(circuit: QuantumCircuit) -> QuantumCircuit:
 
 
 def _hoist_t(circuit: QuantumCircuit) -> QuantumCircuit:
-    """Slide each ``t``/``tdg`` to its earliest commuting position on its qubit line.
-
-    Commutes through ``s``/``sdg``/``t``/``tdg`` and the ``cx`` control; crossing
-    ``x`` flips the dagger. ``h``, the ``cx`` target, ``measure`` and ``barrier``
-    block. Earlier T positions merge injections into earlier, fuller channels.
-    """
-    ops = [(inst.operation.name, [circuit.find_bit(q).index for q in inst.qubits], inst) for inst in circuit.data]
+    # Each t or tdg slides to its earliest commuting position on its qubit line, through s, sdg, t, tdg and
+    # the cx control, flipping the dagger when it crosses an x and stopping at h, the cx target, measure and barrier.
+    ops = [(instruction.operation.name, [circuit.find_bit(qubit).index for qubit in instruction.qubits], instruction)
+           for instruction in circuit.data]
     result = []
-    for name, qubits, inst in ops:
+    for name, qubits, instruction in ops:
         if name not in ("t", "tdg"):
-            result.append([name, qubits, inst])
+            result.append([name, qubits, instruction])
             continue
+
         qubit = qubits[0]
         dagger = name == "tdg"
         insert_at = len(result)
@@ -91,22 +79,18 @@ def _hoist_t(circuit: QuantumCircuit) -> QuantumCircuit:
                 dagger = not dagger
             insert_at = position
         result.insert(insert_at, ["tdg" if dagger else "t", [qubit], None])
+
     rebuilt = QuantumCircuit(circuit.num_qubits, circuit.num_clbits)
-    for name, qubits, inst in result:
-        if inst is not None:
-            rebuilt.append(inst.operation, [rebuilt.qubits[q] for q in qubits], inst.clbits if hasattr(inst, "clbits") else [])
+    for name, qubits, instruction in result:
+        if instruction is not None:
+            rebuilt.append(instruction.operation, [rebuilt.qubits[qubit] for qubit in qubits],
+                           instruction.clbits if hasattr(instruction, "clbits") else [])
         else:
             getattr(rebuilt, name)(qubits[0])
     return rebuilt
 
 
 def parse(path) -> QuantumCircuit:
-    """Load and normalize a circuit to the accepted gate set (``h``/``cx``/``x``/``s``/``sdg``/``t``/``tdg``/``measure``/``barrier``).
-
-    :param path: str | Path to a .qasm file.
-    :returns: QuantumCircuit with ``z``/``y``/``cz``/``swap``/``id``/``rz(k*pi/2)`` expanded.
-    :raises ValueError: on unsupported gates.
-    """
     circuit = _hoist_t(_expand_gates(qasm2.load(str(path))))
     for instruction in circuit.data:
         name = instruction.operation.name

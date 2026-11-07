@@ -1,61 +1,99 @@
-"""Magic state factories.
+# Magic-state factories: charge a finished program for the supply behind its magic tiles.
+# A program consumes a state whenever a MAGIC vertex carries a pair id. The factories sit off the
+# chip, one of height x width tiles yielding a state every period steps for the whole program, so
+# factory_volume = factories x height x width x steps. The sizing says how many factories a program
+# needs: "peak" is the most states one step consumes, "rate" the most in any window of period steps,
+# "tiles" every magic tile consumed at least once.
+from __future__ import annotations
 
-Named factory configurations (:data:`FACTORIES`: ``15-to-1``,
-``t-cultivation``) with a tile footprint and a production interval. The
-interval paces injection scheduling — the first consumed state also
-pays a full interval — and each consumed state draws one production box
-in the layout. Also holds the selective-readout correction table for
-injections (:func:`correction_for`).
-"""
 from dataclasses import dataclass
+from typing import Optional
+
+from . import constant
+from .mapping import Coord
+from .program import IDLE, MAGIC, Program
+
+SIZINGS = ("peak", "rate", "tiles")
 
 
 @dataclass(frozen=True)
-class FactorySpec:
-    """A magic-state factory preset: tile footprint plus production interval."""
+class Factory:
+    height: int = constant.FACTORY_HEIGHT
+    width: int = constant.FACTORY_WIDTH
+    period: int = constant.FACTORY_PERIOD   # steps per magic state
+    sizing: str = constant.FACTORY_SIZING
 
-    #: preset name
-    name: str
-    #: footprint width in tiles (I)
-    dim_i: int
-    #: footprint depth in tiles (J)
-    dim_j: int
-    #: layers of K between two produced magic states
-    interval_k: int
-    #: draw production boxes in the layout (False = off-chip supply, no geometry)
-    render: bool = True
+    @property
+    def area(self) -> int:
+        return self.height * self.width
 
+    @classmethod
+    def parse(cls, text: str) -> Factory:
+        # "HxWxP" or "HxWxP:sizing"
+        dims, _, sizing = text.partition(":")
+        height, width, period = (int(part) for part in dims.lower().split("x"))
+        return cls(height, width, period, sizing or cls.sizing)
 
-FACTORIES = {
-    "15-to-1": FactorySpec("15-to-1", dim_i=6, dim_j=2, interval_k=11),
-    "t-cultivation": FactorySpec("t-cultivation", dim_i=2, dim_j=1, interval_k=2),
-    "external": FactorySpec("external", dim_i=0, dim_j=0, interval_k=0, render=False),
-}
-
-
-def get_factory(name: str) -> FactorySpec:
-    """Look up a magic-state factory preset by name.
-
-    :param name: str key in FACTORIES ("15-to-1" | "t-cultivation").
-    :returns: FactorySpec.
-    :raises ValueError: on unknown name.
-    """
-    if name not in FACTORIES:
-        raise ValueError(f"unknown factory {name!r}; choices: {sorted(FACTORIES)}")
-    return FACTORIES[name]
+    def __str__(self) -> str:
+        return f"{self.height}x{self.width}x{self.period}:{self.sizing}"
 
 
-GADGET_M1 = ("ZZ", ("data", "magic"))
+@dataclass(frozen=True)
+class Bill:
+    factory: Factory
+    steps: int
+    consumed: tuple[int, ...]   # states consumed per step
+    tiles: set[Coord]           # magic tiles consumed at least once
+    factories: int
 
-_CORRECTIONS = {(0, 0): "I", (0, 1): "Z", (1, 0): "I", (1, 1): "Z"}
-_CORRECTIONS_DAGGER = {(0, 0): "I", (0, 1): "Z", (1, 0): "Z", (1, 1): "I"}
+    @property
+    def states(self) -> int:
+        return sum(self.consumed)
+
+    @property
+    def peak(self) -> int:
+        return max(self.consumed, default=0)
+
+    @property
+    def factory_volume(self) -> int:
+        return self.factories * self.factory.area * self.steps
+
+    def total(self, program_volume: int) -> int:
+        return program_volume + self.factory_volume
 
 
-def correction_for(outcomes, dagger: bool) -> str:
-    """Clifford correction of the M1 gadget for a given outcome pair.
+def supply_limits(factory: Optional[Factory], factories: int = 0) -> tuple[int, int, int]:
+    # (cooldown, factories, period) for the router and the verifier. No factory leaves the supply
+    # unlimited; a factory alone puts one behind every magic tile, so a tile yields a state every
+    # period steps; factories = F > 0 shares F of them over the whole chip, F states per period.
+    if factories:
+        return 1, factories, (factory or Factory()).period
+    if factory is None:
+        return 1, 0, 1
+    return factory.period, 0, factory.period
 
-    :param outcomes: (s, r) ints (0|1) — ZZ outcome and magic readout.
-    :param dagger: bool, True for ``tdg``.
-    :returns: "I" or "Z" (Pauli-frame correction on the data qubit).
-    """
-    return (_CORRECTIONS_DAGGER if dagger else _CORRECTIONS)[tuple(outcomes)]
+
+def demand(program: Program) -> tuple[list[int], set[Coord]]:
+    consumed = []
+    tiles = set()
+    for step in program.steps:
+        used = [vertex.tile for vertex in step.of_kind(MAGIC) if vertex.id != IDLE]
+        consumed.append(len(used))
+        tiles.update(used)
+    return consumed, tiles
+
+
+def count(consumed: list[int], tiles: set[Coord], factory: Factory) -> int:
+    if factory.sizing == "tiles":
+        return len(tiles)
+    if factory.sizing == "peak":
+        return max(consumed, default=0)
+    window = factory.period
+    return max((sum(consumed[i:i + window]) for i in range(max(1, len(consumed) - window + 1))), default=0)
+
+
+def charge(program: Program, factory: Factory = Factory(), factories: Optional[int] = None) -> Bill:
+    # A given factory count overrides the sizing, for pricing the supply the compiler was given.
+    consumed, tiles = demand(program)
+    return Bill(factory, len(program.steps), tuple(consumed), tiles,
+                factories if factories is not None else count(consumed, tiles, factory))

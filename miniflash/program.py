@@ -1,307 +1,157 @@
-"""The Program IR.
+# Program: the solver's output, one sparse step graph per time step. Each step lists the non-free tiles as
+# vertices (coordinate, kind, id) and the merges between them as undirected edges. Kinds are QUBIT with the
+# qubit index, MAGIC with the consuming pair or IDLE, and ROUTE with the pair. A pair that executes at a step
+# is the connected component holding its parties, and volume is steps x height x width.
+from __future__ import annotations
 
-The compiler's midpoint: a :class:`Program` holds macros (cells,
-injections, factories), parity-colored inter-layer nets, channels,
-parking and exit colors — everything the backend needs and nothing left
-for it to decide. :func:`elaborate` fuses the floorplan, the synthesized
-cells and the injection points into a Program; :meth:`Program.stats`
-reports volume metrics, per-region Pauli frames and injection
-correction tables. The IR round-trips through JSON via ``to_dict`` /
-``from_dict``.
-"""
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Sequence
 
-from .synthesis import Cell
-from .floorplan import place_injections
-from .factory import FactorySpec, correction_for
+from .circuit import Problem
+from .mapping import Coord, Mapping
+from .route import Route, check_route
 
-
-def _deep_tuple(value):
-    return tuple(_deep_tuple(item) for item in value) if isinstance(value, (list, tuple)) else value
-
-
-def _deep_list(value):
-    return [_deep_list(item) for item in value] if isinstance(value, (list, tuple)) else value
+QUBIT = "qubit"
+MAGIC = "magic"
+ROUTE = "route"
+IDLE = -1
+Edge = frozenset[Coord]
 
 
 @dataclass(frozen=True)
-class MacroInstance:
-    """One placed macro: a synthesized cell or an injection crossbar."""
-
-    #: "cell" | "injection"
+class Vertex:
+    tile: Coord
     kind: str
-    #: geometry payload — Cell for cells, ("gadget", dagger) for injections
-    ref: object
-    #: layer index for cells, channel index for injections
-    layer: int
-    #: die row
-    row: int
-    #: column offset of the macro's left edge
-    offset: int
-    #: qubits the macro acts on
-    qubits: tuple = ()
-    #: injection round within the channel
-    round: int = 0
-    #: injection crossbar slot (0 | 1)
-    slot: int = 0
-    #: in-gap track level, -1 for block injections
-    level: int = -1
+    id: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "tile", tuple(self.tile))
 
 
-@dataclass(frozen=True)
-class Net:
-    """One qubit's wire through one channel, source endpoint to sink endpoint."""
+@dataclass
+class Step:
+    vertices: dict[Coord, Vertex] = field(default_factory=dict)
+    edges: set[Edge] = field(default_factory=set)
 
-    #: qubit the wire carries
-    qubit: int
-    #: endpoint at the upper boundary (pin or parked-slot descriptor)
-    source: tuple
-    #: endpoint at the lower boundary
-    sink: tuple
-    #: channel (inter-layer gap) index
-    channel: int
-    #: entry track level of the jog chain, -1 for a straight run
-    track: int
-    #: jog tuples (level, from, to, plane); die mode appends route segments
-    path: tuple
-    #: wire color bit entering the next layer (0 | 1)
-    color: int
-    #: True when a pending Hadamard must land before the next cell
-    flip: bool
+    def add(self, tile: Coord, kind: str, id: int) -> Vertex:
+        tile = tuple(tile)
+        vertex = Vertex(tile, kind, id)
+        self.vertices[tile] = vertex
+        return vertex
 
+    def link(self, tile_a: Coord, tile_b: Coord) -> None:
+        tile_a = tuple(tile_a)
+        tile_b = tuple(tile_b)
+        self.edges.add(frozenset((tile_a, tile_b)))
 
-@dataclass(frozen=True)
-class Channel:
-    """An inter-layer routing gap."""
+    def of_kind(self, kind: str) -> list[Vertex]:
+        return [vertex for vertex in self.vertices.values() if vertex.kind == kind]
 
-    #: channel index (between layer ``index`` and ``index + 1``)
-    index: int
-    #: number of jog track levels
-    tracks: int
+    def qubit_tiles(self) -> dict[int, Coord]:
+        return {vertex.id: vertex.tile for vertex in self.vertices.values() if vertex.kind == QUBIT}
+
+    def neighbours(self) -> dict[Coord, set[Coord]]:
+        neighbours: dict[Coord, set[Coord]] = {tile: set() for tile in self.vertices}
+        for edge in self.edges:
+            tile_a, tile_b = tuple(edge)
+            neighbours[tile_a].add(tile_b)
+            neighbours[tile_b].add(tile_a)
+        return neighbours
+
+    def components(self) -> list[frozenset[Coord]]:
+        # Connected components with at least one edge, as tile sets.
+        neighbours = self.neighbours()
+        seen: set[Coord] = set()
+        out = []
+        for tile in self.vertices:
+            if tile in seen or not neighbours[tile]:
+                continue
+            component = set()
+            stack = [tile]
+            while stack:
+                current = stack.pop()
+                if current in component:
+                    continue
+                component.add(current)
+                stack.extend(neighbours[current] - component)
+            seen |= component
+            out.append(frozenset(component))
+        return out
+
+    @property
+    def is_walk(self) -> bool:
+        return not self.edges
+
+    def to_dict(self) -> dict:
+        return {"vertices": [[vertex.tile[0], vertex.tile[1], vertex.kind, vertex.id]
+                             for vertex in sorted(self.vertices.values(), key=lambda vertex: vertex.tile)],
+                "edges": sorted([sorted(edge) for edge in self.edges])}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Step:
+        step = cls()
+        for row, col, kind, id in data["vertices"]:
+            step.add((row, col), kind, id)
+        for tile_a, tile_b in data["edges"]:
+            step.link(tuple(tile_a), tuple(tile_b))
+        return step
 
 
 @dataclass
 class Program:
-    """The compiled IR: placed macros, routed nets and channel geometry."""
+    height: int
+    width: int
+    steps: list[Step] = field(default_factory=list)
 
-    #: (width, rows | None) die constraint, None for 1-D
-    die_dims: tuple
-    #: number of die rows used
-    rows: int = 0
-    #: placed MacroInstance list (cells, injections, factories)
-    macros: list = field(default_factory=list)
-    #: routed Net list, one per qubit per channel
-    nets: list = field(default_factory=list)
-    #: Channel list, one per inter-layer gap
-    channels: list = field(default_factory=list)
-    #: number of logical qubits
-    num_qubits: int = 0
-    #: per layer, cell-band width in columns
-    box_widths: list = field(default_factory=list)
-    #: per layer, {qubit: (row, column)} parked slots
-    parking: list = field(default_factory=list)
-    #: {qubit: color bit} at the final boundary
-    exit_colors: dict = field(default_factory=dict)
-    #: FactorySpec driving the injections, None without T gates
-    factory: object = None
-    #: factory units available to the machine
-    factories: int = 0
+    @property
+    def area(self) -> int:
+        return self.height * self.width
 
+    @property
+    def volume(self) -> int:
+        return self.area * len(self.steps)
 
-    def to_dict(self):
-        """Serialize the Program to a JSON-safe dict (inverse of from_dict)."""
-        def ref_dict(macro):
-            if macro.kind == "cell":
-                return macro.ref.to_dict()
-            return list(macro.ref)
-        return {
-            "die_dims": list(self.die_dims) if self.die_dims else None,
-            "rows": self.rows,
-            "factory": {"name": self.factory.name, "dim_i": self.factory.dim_i, "dim_j": self.factory.dim_j, "interval_k": self.factory.interval_k, "render": self.factory.render} if self.factory else None,
-            "factories": self.factories,
-
-            "num_qubits": self.num_qubits,
-            "box_widths": list(self.box_widths),
-            "parking": [[[qubit, list(slot)] for qubit, slot in layer.items()] for layer in self.parking],
-            "exit_colors": [[qubit, color] for qubit, color in self.exit_colors.items()],
-            "macros": [{"kind": m.kind, "ref": ref_dict(m), "layer": m.layer, "row": m.row, "offset": m.offset, "qubits": list(m.qubits), "round": m.round, "slot": m.slot, "level": m.level} for m in self.macros],
-            "nets": [{"qubit": n.qubit, "source": list(n.source), "sink": list(n.sink), "channel": n.channel, "track": n.track, "path": _deep_list(n.path), "color": n.color, "flip": n.flip} for n in self.nets],
-            "channels": [{"index": c.index, "tracks": c.tracks} for c in self.channels],
-        }
+    def __len__(self) -> int:
+        return len(self.steps)
 
     @classmethod
-    def from_dict(cls, data):
-        """Rebuild a Program from a to_dict() payload.
+    def from_routes(cls, problem: Problem, mapping: Mapping, schedule: Sequence[Sequence[Route]]) -> Program:
+        # Every route is checked against its pair and the mapping, and its edges run from the Z party along the
+        # tiles to the X party or the magic tile.
+        prog = cls(mapping.height, mapping.width)
+        for routes in schedule:
+            step = Step()
+            for qubit, tile in mapping.qubits.items():
+                step.add(tile, QUBIT, qubit)
+            consumed = {route.magic: route.pair for route in routes if route.magic is not None}
+            for magic_tile in mapping.magic:
+                step.add(magic_tile, MAGIC, consumed.get(magic_tile, IDLE))
 
-        :param data: dict from :meth:`to_dict`.
-        :returns: Program.
-        """
-        def ref_load(kind, ref):
-            if kind == "cell":
-                return Cell.from_dict(ref)
-            return tuple(ref)
-        return cls(
+            for route in routes:
+                pair = problem.pairs[route.pair]
+                check_route(route, pair, mapping)
+                tiles = route.tiles()
+                for tile in tiles:
+                    step.add(tile, ROUTE, route.pair)
+                step.link(mapping.qubits[pair.z], tiles[0])
+                for tile_a, tile_b in zip(tiles, tiles[1:]):
+                    step.link(tile_a, tile_b)
+                step.link(tiles[-1], route.magic if pair.is_magic else mapping.qubits[pair.x])
+            prog.steps.append(step)
+        return prog
 
-            die_dims=tuple(data["die_dims"]) if data["die_dims"] else None,
-            rows=data.get("rows", 0),
-            factory=FactorySpec(**data["factory"]) if data.get("factory") else None,
-            factories=data.get("factories", 0),
-            num_qubits=data["num_qubits"],
-            box_widths=list(data["box_widths"]),
-            parking=[{qubit: tuple(slot) for qubit, slot in layer} for layer in data["parking"]],
-            exit_colors={qubit: color for qubit, color in data["exit_colors"]},
-            macros=[MacroInstance(kind=m["kind"], ref=ref_load(m["kind"], m["ref"]), layer=m["layer"], row=m["row"], offset=m["offset"], qubits=tuple(m["qubits"]), round=m.get("round", 0), slot=m.get("slot", 0), level=m.get("level", -1)) for m in data["macros"]],
-            nets=[Net(qubit=n["qubit"], source=tuple(n["source"]), sink=tuple(n["sink"]), channel=n["channel"], track=n["track"], path=_deep_tuple(n["path"]), color=n["color"], flip=n["flip"]) for n in data["nets"]],
-            channels=[Channel(**c) for c in data["channels"]],
-        )
+    def to_dict(self) -> dict:
+        return {"height": self.height, "width": self.width, "steps": [step.to_dict() for step in self.steps]}
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Program:
+        return cls(data["height"], data["width"], [Step.from_dict(step) for step in data["steps"]])
 
-    def stats(self):
-        """Compile-quality metrics of this Program: volumes, parity frames, corrections.
+    def save(self, path) -> None:
+        Path(path).write_text(json.dumps(self.to_dict()))
 
-        Lowers the IR internally to measure geometry (extents only — O(1)
-        memory, no pipes materialized).
-
-        :returns: dict — route_stats, volume, cube_envelope, bbox,
-            pauli_frames; die_dims when die-constrained; factory, t_count,
-            wait_levels, compute_volume and per-injection corrections when the
-            circuit has T gates.
-        """
-        from .lower import build_layout
-
-        layout = build_layout(self)
-        cell_macros = [macro for macro in self.macros if macro.kind == "cell"]
-        injection_macros = [macro for macro in self.macros if macro.kind == "injection"]
-        factory_spec = self.factory
-
-        stats = {"route_stats": layout["route_stats"], "volume": layout["volume"], "cube_envelope": layout["cube_envelope"], "bbox": list(layout["bbox"]), "pauli_frames": {f"region_{index}": macro.ref.pauli_frame for index, macro in enumerate(cell_macros)}, "factory": None}
-        if self.die_dims is not None:
-            stats["die_dims"] = {"width": self.die_dims[0], "rows_cap": self.die_dims[1], "rows": self.rows}
-        if injection_macros:
-            stats["factory"] = {"name": factory_spec.name, "dim_i": factory_spec.dim_i, "dim_j": factory_spec.dim_j, "interval_k": factory_spec.interval_k}
-            stats["t_count"] = layout["t_count"]
-            stats["wait_levels"] = layout["wait_levels"]
-            stats["compute_volume"] = layout["compute_volume"]
-            stats["injections"] = [
-                {
-                    "qubit": macro.qubits[0],
-                    "channel": macro.layer,
-                    "dagger": macro.ref[1],
-                    "readout": "X if s==0 else Y",
-                    "corrections": {f"{s}{r}": correction_for((s, r), macro.ref[1]) for s in (0, 1) for r in (0, 1)},
-                }
-                for macro in injection_macros
-            ]
-        return stats
-
-
-def _normalized_placements(floorplan, layer_cells):
-    placements = []
-    for layer, entry in enumerate(layer_cells):
-        cells_list = [entry] if isinstance(entry, Cell) else list(entry)
-        layouts = floorplan.placements[layer] if floorplan.placements else [(0, 0, None)] * len(cells_list)
-        placements.append(list(zip(cells_list, layouts)))
-    return placements
-
-
-def _parity_ledger(floorplan, placements):
-    num_layers = len(placements)
-    exit_bits = []
-    wire_bits = {qubit: 0 for qubit in range(floorplan.num_qubits)}
-    for layer in range(num_layers):
-        for cell, (_, offset, box_qubits) in placements[layer]:
-            qubits = box_qubits if box_qubits is not None else list(floorplan.out_port_columns[layer])
-            wire_bits.update(cell.pin_parities({qubit: floorplan.out_port_columns[layer][qubit] - offset for qubit in qubits if qubit in floorplan.out_port_columns[layer]}, "out"))
-        exit_bits.append(dict(wire_bits))
-    return exit_bits
-
-
-def _slots(floorplan, layer, use_out):
-    columns = floorplan.out_port_columns[layer] if use_out else floorplan.in_port_columns[layer]
-    slots = {}
-    if floorplan.die_dims is not None:
-        for row, _, box in floorplan.placements[layer]:
-            for qubit in box:
-                if qubit in columns:
-                    slots[qubit] = ("pin", row, columns[qubit])
-        for qubit, (row, col) in floorplan.parked_slots[layer].items():
-            slots[qubit] = ("park", row, col)
-    else:
-        for qubit, col in columns.items():
-            slots[qubit] = ("pin", 0, col)
-        for qubit, col in floorplan.lane_columns[layer].items():
-            slots[qubit] = ("park", 0, col)
-    return slots
-
-
-def _assert_hadamard_ledger(floorplan, placements, exit_bits):
-    for layer in range(len(placements)):
-        arriving = exit_bits[layer - 1] if layer else {}
-        for cell, (_, _, box_qubits) in placements[layer]:
-            if cell.in_bases is None:
-                continue
-            qubits = box_qubits if box_qubits is not None else sorted(floorplan.in_port_columns[layer])
-            for qubit in qubits:
-                if qubit not in floorplan.in_port_columns[layer]:
-                    continue
-                if cell.in_bases.get(qubit, 0) != arriving.get(qubit, 0):
-                    raise RuntimeError(f"elaborate: hadamard ledger mismatch at layer {layer}, qubit {qubit}: wire delivers bit {arriving.get(qubit, 0)} but the cell was placed against in_bases {cell.in_bases.get(qubit, 0)} — flip landings and ledger have diverged")
-
-
-def elaborate(floorplan, layer_cells, events=(), channels=(), factory=None, factories=1):
-    """Fuse the floorplan, synthesized cells and injections into the Program IR.
-
-    :param floorplan: Floorplan.
-    :param layer_cells: list per layer of Cell (or a single Cell).
-    :param events: list[InjectionEvent].
-    :param channels: list[int] from synthesize, parallel to events.
-    :param factory: FactorySpec | None.
-    :param factories: int, factory units.
-    :returns: Program — cell/factory/injection macros, parity-colored inter-layer
-        nets (flip marks a Hadamard landing), channels, parking and exit colors.
-    """
-    points = place_injections(events, channels, floorplan, factory=factory, factories=factories) if events else []
-    placements = _normalized_placements(floorplan, layer_cells)
-    num_layers = len(placements)
-    exit_bits = _parity_ledger(floorplan, placements)
-    _assert_hadamard_ledger(floorplan, placements, exit_bits)
-
-    macros = []
-    for layer in range(num_layers):
-        for cell, (row, offset, box_qubits) in placements[layer]:
-            macros.append(MacroInstance(kind="cell", ref=cell, layer=layer, row=row, offset=offset, qubits=tuple(box_qubits if box_qubits is not None else sorted(floorplan.out_port_columns[layer]))))
-    if factory is not None and points:
-        for point in points:
-            macros.append(MacroInstance(kind="injection", ref=("gadget", point.dagger), layer=point.channel, row=point.row, offset=point.column, qubits=(point.qubit,), round=point.round, slot=point.slot, level=point.level))
-
-    nets = []
-    for channel in range(num_layers - 1):
-        before = _slots(floorplan, channel, use_out=True)
-        after = _slots(floorplan, channel + 1, use_out=False)
-        consumed_next = set(floorplan.in_port_columns[channel + 1])
-        if floorplan.die_dims is not None:
-            moved = {move.qubit: [] for move in floorplan.grid_moves[channel]}
-            for move in sorted(floorplan.grid_moves[channel], key=lambda move: move.level):
-                moved[move.qubit].append(move)
-        else:
-            moved = {}
-            for move in sorted(floorplan.moves[channel], key=lambda move: move.level):
-                moved.setdefault(move.qubit, []).append(move)
-
-        for qubit in sorted(before):
-            if qubit not in after:
-                continue
-            chain = moved.get(qubit, [])
-            if floorplan.die_dims is not None:
-                path = tuple((move.level, move.src, move.dst) + tuple(move.path) for move in chain)
-            else:
-                path = tuple((move.level, move.from_column, move.to_column, move.plane) for move in chain)
-            color = exit_bits[channel][qubit]
-            nets.append(Net(qubit=qubit, source=before[qubit], sink=after[qubit], channel=channel, track=chain[0].level if chain else -1, path=path, color=color, flip=color == 1 and qubit in consumed_next))
-
-    channels = [Channel(index=channel, tracks=floorplan.gap_levels[channel]) for channel in range(num_layers - 1)]
-    if floorplan.die_dims is not None:
-        parking = [dict(floorplan.parked_slots[layer]) for layer in range(num_layers)]
-    else:
-        parking = [{qubit: (0, col) for qubit, col in floorplan.lane_columns[layer].items()} for layer in range(num_layers)]
-    return Program(die_dims=floorplan.die_dims, rows=floorplan.rows, macros=macros, nets=nets, channels=channels, num_qubits=floorplan.num_qubits, box_widths=list(floorplan.box_widths), parking=parking, exit_colors=dict(exit_bits[-1]) if exit_bits else {}, factory=factory if points else None, factories=factories if factory is not None and points else 0)
+    @classmethod
+    def load(cls, path) -> Program:
+        return cls.from_dict(json.loads(Path(path).read_text()))

@@ -1,131 +1,91 @@
-"""The miniflash driver + CLI: ``python main.py circuit.qasm [-o out.gltf]``.
-
-``compile()`` runs the package pipeline to the Program IR and is the
-library entry point (``from main import compile``); ``main()`` prints the
-volume stats, and renders the glTF scene (``write_gltf``) only when
-``-o`` is given.
-"""
-
-import argparse
-import json
+# Compile circuits into verified tile programs and print one CSV row each. A .qasm file compiles
+# as a flat DAG, a hierarchy .json bottom-up through its call tree. The knobs are in
+# miniflash/constant.py; the glTF scene of each circuit lands in the output directory under the
+# circuit's name, or at the given .gltf path when there is one circuit.
+import argparse, csv, sys, time
 from pathlib import Path
 
 import miniflash as flash
+from miniflash import constant
 
+parser = argparse.ArgumentParser(description="compile circuits to lattice-surgery tile programs")
+parser.add_argument("circuits", nargs="+", help="qasm circuits or hierarchy json files")
+parser.add_argument("-o", "--output", type=Path, default=constant.OUTPUT_DIR, help="output directory, or a .gltf file for one circuit")
+args = parser.parse_args()
 
-def compile(qasm_path, cache_dir=".miniflash-cache", max_gates=16, factory="15-to-1", die_dims=None, factories=1, budget_s=600, engine="auto", fixed_columns=False, t_layers=False):
-    """Compile a circuit to the Program IR: parse -> partition -> synthesize -> elaborate.
+single = args.output.suffix.lower() == ".gltf"
+out_dir = args.output.parent if single else args.output
 
-    Partitioning is coarse-first: regions start at whole-circuit granularity
-    (capped at 16 qubits) and split in place when a region exhausts its processing
-    budget (16 -> 12 -> 8 -> 6 -> 4 -> 2). ``t_layers`` swaps that for
-    :func:`miniflash.partition_t_layers`, which cuts only where the T gates
-    force a channel and so hands the packer the coarsest regions available.
+FIELDS = ["circuit", "qubits", "pairs", "depth", "grid", "steps", "walk_steps", "volume", "compile_s", "verify_s"]
 
-    :param qasm_path: str | Path to a .qasm file.
-    :param cache_dir: str, LaSsynth disk cache directory.
-    :param max_gates: int, floor of the per-region gate cap.
-    :param factory: str preset name or FactorySpec.
-    :param die_dims: (width, rows | None) or None for 1-D.
-    :param factories: int, magic state factory units.
-    :param budget_s: int, processing budget in seconds per region.
-    :param engine: "auto" (cache hits, then the packer), "sat" (solver only,
-        splitting what it cannot take) or "packing" (packer only, cache never read).
-    :param t_layers: bool, partition by T-aligned layers instead of the greedy
-        window search — the coarse regions a solver-free packer needs.
-    :returns: Program.
-    """
-    circuit = flash.parse(qasm_path)
-    top = min(circuit.num_qubits, 16)
-    caps = [top] + [cap for cap in (12, 8, 6, 4, 2) if cap < top]
-    gates_cap = lambda cap: max(max_gates, cap * cap)
-    partitioned = flash.partition_t_layers(circuit) if t_layers else flash.partition(circuit, max_qubits=caps[0], max_gates=gates_cap(caps[0]))
-    regions, events = partitioned.regions, partitioned.events
-    if not regions and not events:
-        raise RuntimeError("compile: circuit has no synthesizable regions")
+factory = flash.Factory() if constant.LIMITED_SUPPLY else None
+factories = constant.SHARED_FACTORIES if constant.LIMITED_SUPPLY else 0
+solver = flash.make(constant.SOLVER, shapes=constant.LAYOUT_SHAPES, factory=factory, factories=factories)
+out_dir.mkdir(parents=True, exist_ok=True)
 
-    factory_spec = (factory if isinstance(factory, flash.FactorySpec) else flash.get_factory(factory)) if events else None
-    rung_of = {id(region): 0 for region in regions}
-    no_merge = set()
-    while True:
-        try:
-            floorplan, cells, channels = flash.synthesize(partitioned, cache_dir=cache_dir, die_dims=die_dims, budget_s=budget_s, engine=engine, fixed_columns=fixed_columns, no_merge=frozenset(no_merge))
-            break
-        except RuntimeError as error:
-            merge_keys = getattr(error, "merge_keys", None)
-            if merge_keys is not None:
-                no_merge.add(merge_keys)
-                continue
-            failed = getattr(error, "region", None)
-            if failed is None:
-                raise
-            rung = rung_of[id(failed)] + 1
-            if rung >= len(caps):
-                raise
-            index = next(position for position, region in enumerate(regions) if region is failed)
-            subs = flash.split_region(failed, caps[rung], gates_cap(caps[rung]))
-            regions[index : index + 1] = subs
-            for sub in subs:
-                rung_of[id(sub)] = rung
+writer = csv.DictWriter(sys.stdout, fieldnames=FIELDS)
+writer.writeheader()
+for path in args.circuits:
+    name = Path(path).stem
+    hierarchical = Path(path).suffix.lower() == ".json"
 
-    return flash.elaborate(floorplan, cells, events=events, channels=channels, factory=factory_spec, factories=factories)
-
-
-def main():
-    """CLI entry point: compile to the Program IR, then write the glTF scene.
-
-    :returns: None; prints the glTF path.
-    """
-    parser = argparse.ArgumentParser(description="Compile a Clifford+T OpenQASM 2.0 circuit into a lattice-surgery layout (glTF 2.0)")
-    parser.add_argument("qasm",                                              help="input .qasm file")
-    parser.add_argument("-o", "--out",                                       help="write the glTF scene to this path (default: stats only, no glTF)")
-    parser.add_argument("--factory",     default="15-to-1",                  help=f"magic state factory: {' | '.join(sorted(flash.FACTORIES))} or custom IxJxK dims (e.g. 6x2x11)")
-    parser.add_argument("--die",         type=int, metavar="WIDTH",          help="die width constraint (rows grow on demand)")
-    parser.add_argument("--factories",   type=int, default=1,                help="factory units (die mode)")
-    parser.add_argument("--engine",      default="auto", choices=flash.ENGINES, help="auto: cached cells, then the packer | sat: solver only | packing: packer only, cache never read")
-    parser.add_argument("--budget",      type=int, default=600, metavar="SECONDS", help="per-region solver budget (--engine sat)")
-    parser.add_argument("--t-layers",    action="store_true",              help="partition by T-aligned layers (coarse regions for the solver-free packer)")
-    parser.add_argument("--fixed-columns", action="store_true",              help="fixed home columns: interleave-merged joint cells, packed injections, distributed magic entry")
-    parser.add_argument("--cache-dir",   default=".miniflash-cache",         help="cell cache directory")
-    parser.add_argument("--dump-ir",     action="store_true",                help="also write <name>.program.json")
-    arguments = parser.parse_args()
-
-    factory = arguments.factory
-    if factory not in flash.FACTORIES:
-        try:
-            factory = flash.FactorySpec("custom", *(int(dim) for dim in factory.split("x")))
-        except (TypeError, ValueError):
-            parser.error(f"--factory: {factory!r} is neither a preset ({', '.join(sorted(flash.FACTORIES))}) nor IxJxK dims")
-    program = compile(
-        arguments.qasm,
-        cache_dir=arguments.cache_dir,
-        factory=factory,
-        die_dims=(arguments.die, None) if arguments.die else None,
-        factories=arguments.factories,
-        budget_s=arguments.budget,
-        engine=arguments.engine,
-        fixed_columns=arguments.fixed_columns,
-        t_layers=arguments.t_layers,
-    )
-
-    if arguments.dump_ir:
-        ir_path = (Path(arguments.out) if arguments.out else Path(Path(arguments.qasm).name)).with_suffix(".program.json")
-        if ir_path.parent != Path("."):
-            ir_path.parent.mkdir(parents=True, exist_ok=True)
-        ir_path.write_text(json.dumps(program.to_dict(), indent=1))
-    if arguments.out:
-        gltf_path = Path(arguments.out)
-        if gltf_path.parent != Path("."):
-            gltf_path.parent.mkdir(parents=True, exist_ok=True)
-        flash.write_gltf(program, gltf_path)
-        print(gltf_path)
+    started = time.perf_counter()
+    if hierarchical:
+        hierarchy = flash.Hierarchy.load(path)
+        problem = hierarchy.problem
+        program = solver.solve_hierarchy(hierarchy, constant.HIERARCHY_PLACEMENT)
     else:
-        stats = program.stats()
-        line = f"miniflash: {Path(arguments.qasm).stem} cube_envelope={stats['cube_envelope']} volume={stats['volume']}"
-        if stats.get("t_count") is not None:
-            line += f" t_count={stats['t_count']} wait_levels={stats['wait_levels']}"
-        print(line)
+        problem = flash.read_qasm(path)
+        program = solver.solve(problem)
+    compiled = time.perf_counter()
+    report = flash.verify(problem, program, factory, factories)
+    verified = time.perf_counter()
 
+    writer.writerow({"circuit": name, "qubits": problem.n_qubits, "pairs": len(problem.pairs), "depth": problem.depth,
+                "grid": f"{report.height}x{report.width}", "steps": report.steps, "walk_steps": report.walk_steps, "volume": report.volume,
+                "compile_s": round(compiled - started, 3), "verify_s": round(verified - compiled, 3)})
+    sys.stdout.flush()
+    print(f"{solver.name} {name}: {report.steps} steps, volume {report.volume}, {compiled - started:.2f}s", file=sys.stderr, flush=True)
+    if hierarchical:
+        stats = solver.hierarchy_stats
+        print(f"hierarchy: {stats['calls']} calls, {stats['cells']} distinct cells, "
+              f"{stats['routed_pairs']}/{stats['total_pairs']} pairs routed", file=sys.stderr, flush=True)
 
-if __name__ == "__main__":
-    main()
+    if constant.WRITE_PROGRAM:
+        program.save(out_dir / f"{name}.json")
+    if not constant.WRITE_GLTF:
+        continue
+    out = args.output if single else out_dir / f"{name}.gltf"
+
+    supply = None
+    if factories:
+        supply = flash.plan(program, factories, factory)
+        for conflict in supply.conflicts:
+            print(f"supply conflict: {conflict}", file=sys.stderr)
+
+    # the resynthesis windows over the program, carved out as boxes, or replaced by the cells lassynth finds
+    overlays = ()
+    carve = False
+    if constant.RENDER_WINDOWS:
+        from miniflash.resynthesis import boxes, extract_dp, extract_greedy, write_cells
+        if constant.WINDOW_CUT == "dp":
+            picked = extract_dp(program, problem)
+        else:
+            picked = extract_greedy(program, problem, min_gain=constant.WINDOW_MIN_GAIN)
+        carve = constant.RENDER_WINDOWS == "coarse"
+        overlays = boxes(picked, alpha=1.0 if carve else constant.WINDOW_ALPHA)
+        print(f"windows: {sum(len(slab.windows) for slab in picked)} in {len(picked)} slabs covering "
+              f"{sum(slab.steps for slab in picked)} of {report.steps} steps", file=sys.stderr)
+    if constant.RENDER_WINDOWS in ("cells", "cells-inplace"):
+        from miniflash.resynthesis.synth import cells
+
+        def announce(slab, cell):
+            print(f"cell {slab.start}-{slab.stop} {cell.window.box.height}x{cell.window.box.width}: "
+                  f"{constant.LAYERS_PER_STEP * cell.window.steps} to {cell.depth} layers", file=sys.stderr, flush=True)
+
+        plan = cells(picked, program, problem, timeout=constant.LASSYNTH_TIMEOUT, report=announce)
+        layers = write_cells(program, plan, out, compact=constant.RENDER_WINDOWS == "cells")
+        print(f"cells: {constant.LAYERS_PER_STEP * report.steps} to {layers} layers, volume "
+              f"{constant.LAYERS_PER_STEP * report.volume} to {layers * report.height * report.width} tile-layers", file=sys.stderr)
+    else:
+        flash.write_gltf(program, out, supply, overlays=overlays, carve=carve)
