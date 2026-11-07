@@ -4,9 +4,10 @@
 reference point). `place(problem, shape, spectral=True)` is "+ Placement":
 a placed order on the paired-lane array instead of index order.
 
-The virtual map is seeded spectrally from the interaction graph: the Fiedler vector
-of its Laplacian groups qubits into site rows; the next mode orders each row,
-so qubits that interact often land near each other. A short simulated anneal then
+The virtual map is seeded from the interaction graph, spectrally by default: the
+Fiedler vector of its Laplacian groups qubits into site rows; the next mode orders
+each row, so qubits that interact often land near each other. `init` picks another
+seed instead (random, gordian, gordian-l, mincut, aplace, mpl; see `initial`). A short simulated anneal then
 swaps qubits between sites (empty sites included) to lower a routing proxy summed
 over the ASAP layers of the DAG:
 
@@ -35,6 +36,7 @@ import numpy as np
 
 from ..circuit import Problem
 from ..mapping import Coord, Layout, Mapping
+from . import initial
 
 COLL, LANE, LEN = 6.0, 6.0, 0.25
 
@@ -61,16 +63,37 @@ class Workload:
         return edges
 
 
-def spectral_order(problem: Problem, site_rows: int, site_cols: int,
-                   workload: Optional[Workload] = None) -> Dict[int, Tuple[int, int]]:
-    """Qubit -> virtual site on a site_rows x site_cols array from the Laplacian's two
-    smallest nontrivial modes: the Fiedler vector ranks rows, the next mode columns."""
+INITS = ("spectral", "random", "gordian", "gordian-l", "mincut", "aplace", "mpl")
+
+
+def interaction_matrix(problem: Problem, workload: Optional[Workload] = None) -> np.ndarray:
+    """CX counts between qubit pairs plus 1e-3 between every pair, which connects
+    otherwise disconnected components. Every initial placement reads this graph."""
     n = problem.n_qubits
     adjacency = np.full((n, n), 1e-3)
     np.fill_diagonal(adjacency, 0.0)
     for (a, b), w in (workload.interaction() if workload is not None else problem.interaction()).items():
         adjacency[a, b] += w
         adjacency[b, a] += w
+    return adjacency
+
+
+def initial_order(init: str, problem: Problem, site_rows: int, site_cols: int,
+                  workload: Optional[Workload] = None, seed: int = 0) -> Dict[int, Tuple[int, int]]:
+    """Qubit -> virtual site from the named initial placement (one of INITS)."""
+    if init == "spectral":
+        return spectral_order(problem, site_rows, site_cols, workload)
+    if init not in initial.ORDERS:
+        raise ValueError(f"unknown initial placement {init!r}; choose from {', '.join(INITS)}")
+    return initial.ORDERS[init](interaction_matrix(problem, workload), site_rows, site_cols, seed)
+
+
+def spectral_order(problem: Problem, site_rows: int, site_cols: int,
+                   workload: Optional[Workload] = None) -> Dict[int, Tuple[int, int]]:
+    """Qubit -> virtual site on a site_rows x site_cols array from the Laplacian's two
+    smallest nontrivial modes: the Fiedler vector ranks rows, the next mode columns."""
+    n = problem.n_qubits
+    adjacency = interaction_matrix(problem, workload)
     laplacian = np.diag(adjacency.sum(1)) - adjacency
     _vals, vecs = np.linalg.eigh(laplacian)
     row_scores = vecs[:, 1] if n > 1 else np.zeros(n)
@@ -235,16 +258,18 @@ def square_shape(n_qubits: int, shape: Optional[Tuple[int, int]] = None) -> Tupl
 
 def place(problem: Problem, shape: Optional[Tuple[int, int]] = None, spectral: bool = False, seed: int = 0,
           iters: Optional[int] = None, anneal: bool = True,
-          weights: Tuple[float, float, float] = (COLL, LANE, LEN), workload: Optional[Workload] = None) -> Placement:
-    """Index order on the sparse square, or (`spectral`) the spectral seed and anneal on
-    the paired-lane array, of the given shape (the smallest square by default);
-    `iters` defaults to 100 proposals per qubit. `workload` optionally replaces the
-    flat layers with weighted distinct layers for spectral seeding and annealing."""
+          weights: Tuple[float, float, float] = (COLL, LANE, LEN), workload: Optional[Workload] = None,
+          init: str = "spectral") -> Placement:
+    """Index order on the sparse square, or (`spectral`) a seed and anneal on the
+    paired-lane array, of the given shape (the smallest square by default). `init`
+    names the seed (INITS, spectral by default); `iters` defaults to 100 proposals per
+    qubit. `workload` optionally replaces the flat layers with weighted distinct
+    layers for seeding and annealing."""
     n = problem.n_qubits
     site_rows, site_cols = square_shape(n, shape)
     if not spectral:
         return Placement(Mapping.sparse(site_rows, site_cols, n), Layout.identity(n, (site_rows, site_cols)), 0.0, 0.0)
-    order = spectral_order(problem, site_rows, site_cols, workload)
+    order = initial_order(init, problem, site_rows, site_cols, workload, seed)
     base = Mapping.paired(site_rows, site_cols, n)
     full = Mapping.paired(site_rows, site_cols, site_rows * site_cols)      # every site filled, to read the geometry
     row_pos = sorted({t[0] for t in full.qubits.values()})

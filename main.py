@@ -66,6 +66,8 @@ def main():
     ap.add_argument("--extra", type=int, default=6, help="spacing: lane budget per partition beyond the site rows/cols")
     ap.add_argument("--share", type=float, default=4.0, help="routing: penalty per row or column a route newly loads")
     ap.add_argument("--seed", type=int, default=0, help="placement: anneal seed")
+    ap.add_argument("--init", choices=list(flash.INITS), default="spectral",
+                    help="placement: the initial placement the anneal starts from (default: spectral)")
     ap.add_argument("--factory", type=flash.Factory.parse, metavar="HxWxT",
                     help="magic-state factory: H tiles deep, W along the chip side, one state per T steps. "
                          "Alone: one behind every magic tile. Omitted: unlimited supply")
@@ -92,7 +94,7 @@ def main():
     if a.windows and not a.output:
         ap.error("--windows needs -o")
     solver = flash.make(a.solver, shapes=a.shapes, extra=a.extra, share=a.share, seed=a.seed,
-                        factory=a.factory, factories=a.factories)
+                        factory=a.factory, factories=a.factories, init=a.init)
     if a.hierarchical and (not solver.routing or any(Path(p).suffix.lower() != ".json" for p in paths)):
         ap.error("--hierarchical requires JSON inputs, a routing/spacing/placement/layout solver")
     w = csv.DictWriter(sys.stdout, fieldnames=FIELDS)

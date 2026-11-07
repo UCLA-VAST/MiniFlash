@@ -46,6 +46,9 @@ flash.write_gltf(program, "tof3.gltf")
   steps. Alone, one factory sits behind every magic tile.
 - `--factories F`: F shared factories feed the whole chip through delivery rings
   around it; `-o` draws them.
+- `--init`: the initial placement the anneal starts from: `spectral` (default),
+  `random`, `gordian`, `gordian-l`, `mincut`, `aplace` or `mpl`
+  (`miniflash/synthesis/initial.py`); `scripts/benchmark_init.py` compares them.
 - `--json FILE`: save the tile program.
 
 Without `--factory`, magic supply is unlimited. Single-qubit Cliffords are free.

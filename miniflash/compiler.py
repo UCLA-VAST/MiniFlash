@@ -5,6 +5,7 @@
     Compiler(routing=True)                       # + criticality-driven routing on the fixed grid
     Compiler(routing=True, spacing=True)         # + on-demand spacing: partitions, compaction, walks
     Compiler(..., placement=True)                # + spectral placement and annealing on the paired-lane array
+    Compiler(..., placement=True, init="gordian")  # the same anneal from another initial placement
     Compiler(..., layout="stats")                # + layout selection: the shape predicted from the DAG
     Compiler(..., layout=3)                      # or compare the three smallest-area shapes
 
@@ -32,7 +33,7 @@ from .hierarchy import Hierarchy
 from .mapping import Layout, Mapping
 from .synthesis import hierarchical
 from .synthesis.layout import Shape, candidate_shapes, stats_shape
-from .synthesis.placement import COLL, LANE, LEN, Placement, Workload, place
+from .synthesis.placement import COLL, INITS, LANE, LEN, Placement, Workload, place
 from .factory import Factory, supply_limits
 from .program import Program
 from .route import Schedule
@@ -40,7 +41,7 @@ from .synthesis.schedule import schedule
 from .synthesis.spacing import Partition, budgets, cut, space
 
 LADDER = ("vanilla", "dependency", "routing", "spacing", "placement", "layout")
-DEFAULTS = dict(extra=6, share=4.0, seed=0)
+DEFAULTS = dict(extra=6, share=4.0, seed=0, init="spectral")
 
 
 class Compiler:
@@ -50,7 +51,7 @@ class Compiler:
                  extra: int = 6, share: float = 4.0, row_budget: Optional[int] = None, col_budget: Optional[int] = None,
                  exact: int = 12, factory: Optional[Factory] = None, factories: int = 0,
                  seed: int = 0, iters: Optional[int] = None, anneal: bool = True,
-                 weights: Tuple[float, float, float] = (COLL, LANE, LEN)):
+                 weights: Tuple[float, float, float] = (COLL, LANE, LEN), init: str = "spectral"):
         """dependency  False: one pair per step. True: ASAP scheduling. Ignored once `routing` is on.
         routing     the criticality-driven router with lane scoring; without `spacing` its budget
                     is the whole grid, so the fixed array is kept and no walks appear.
@@ -66,19 +67,22 @@ class Compiler:
         factories   F > 0: F shared factories (the default Factory() if none is given) feed the
                     whole chip from step 0, F states per T steps (see factory.supply_limits).
         extra, share, row_budget, col_budget, exact configure the budgets and the router;
-        seed, iters, anneal, weights configure placement."""
+        seed, iters, anneal, weights, init configure placement; `init` names the initial
+                    placement the anneal starts from (placement.INITS, spectral by default)."""
         if spacing not in (False, True, "whole"):
             raise ValueError(f"spacing must be False, True, or 'whole', not {spacing!r}")
         if layout is not None and not (isinstance(layout, int) or layout == "stats"):
             raise ValueError(f"layout must be None, 'stats', or a count, not {layout!r}")
         if isinstance(placement, Placement) and layout is not None:
             raise ValueError("a fixed placement has one shape; layout selection needs placement=True")
+        if init not in INITS:
+            raise ValueError(f"init must be one of {', '.join(INITS)}, not {init!r}")
         supply_limits(factory, factories)   # validates
         self.dependency, self.routing, self.spacing, self.placement, self.layout_mode = dependency, routing, spacing, placement, layout
         self.shape_option = shape
         self.extra, self.share, self.row_budget, self.col_budget, self.exact = extra, share, row_budget, col_budget, exact
         self.factory, self.factories = factory, factories
-        self.seed, self.iters, self.anneal, self.weights = seed, iters, anneal, weights
+        self.seed, self.iters, self.anneal, self.weights, self.init = seed, iters, anneal, weights, init
         # results of the last solve (of the selected shape when several were tried)
         self.shape: Optional[Shape] = None
         self.layout: Optional[Layout] = None
@@ -112,6 +116,8 @@ class Compiler:
         suffix = ""
         if isinstance(self.layout_mode, int):
             suffix += f"-shapes{self.layout_mode}"
+        if self.init != DEFAULTS["init"] and self.placement is True:
+            suffix += f"-{self.init}"
         if self.seed != DEFAULTS["seed"] and self.placement:
             suffix += f"-s{self.seed}"
         if self.factory is not None and self.routing:
@@ -132,7 +138,8 @@ class Compiler:
         if isinstance(self.placement, Placement):
             placed = self.placement
         else:
-            placed = place(problem, shape, bool(self.placement), self.seed, self.iters, self.anneal, self.weights, workload)
+            placed = place(problem, shape, bool(self.placement), self.seed, self.iters, self.anneal, self.weights,
+                           workload, self.init)
         self.mapping, self.layout = placed.mapping, placed.layout
         self.initial_cost, self.final_cost = placed.initial_cost, placed.final_cost
         return placed.mapping

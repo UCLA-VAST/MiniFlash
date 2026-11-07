@@ -1,6 +1,7 @@
 """The compiler's passes, one module per component of the compiler's ladder.
 
-    placement.place     where each qubit sits: index order, or spectral seed and anneal
+    placement.place     where each qubit sits: index order, or a seed and anneal
+    initial             the seeds besides spectral: random, GORDIAN(-L), APlace, mPL
     schedule.schedule   which pairs execute per step: one, or every ready pair (dependency)
     routing.route       the criticality-driven router with lane budgets (routing, spacing)
     spacing.space       how much array a program keeps: all, compacted once, or partitions with walks
