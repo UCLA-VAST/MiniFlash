@@ -10,6 +10,7 @@
 | `ftcb/` | 47 | FT compilation benchmarks (Fermi-Hubbard, Heisenberg, Ising, QFT, QPE, HHL, QSVT) |
 | `gf-mult/` | 15 | GF(2^N) Galois-field multipliers |
 | `graphstate/` | 12 | graphstate{4,8,16} chain/complete/dense/grid/linear/rand/ring |
+| `parallel-t/` | 8 | layers of parallel T gates, `par-t-N` |
 | `synthlr/` | 5 | SynthesizeLR worst-case linear-reversible CNOT circuits (arXiv:2510.10967, DQI) |
 | `t-factory/` | 8 | t-factory injection fixtures (chain/layer/pair/sandwich/smoke/clifford3) |
 | `toffoli/` | 8 | Toffoli (`tof-N`) and Barenco-Toffoli |
@@ -17,11 +18,7 @@
 
 miniflash compiles Clifford+T: h/cx/x/s/sdg/t/tdg directly,
 z/y/cz/swap/id/rz(k*pi/2)/ccx by auto-expansion. Circuits with gates
-outside that set (arbitrary-angle rz etc.) raise at parse. Visualize a
-circuit's partition with:
-
-    PYTHONPATH=. python -c "import miniflash as flash; print(flash.partition(
-        flash.parse('benchmarks/synthlr/synthlr-6.qasm')).to_text(color=True))"
+outside that set (arbitrary-angle rz etc.) raise at parse.
 
 ## Hierarchical circuits
 

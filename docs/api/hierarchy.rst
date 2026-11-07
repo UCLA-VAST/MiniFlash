@@ -1,0 +1,4 @@
+Hierarchies
+===========
+
+.. automodule:: miniflash.hierarchy

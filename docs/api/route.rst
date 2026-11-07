@@ -1,0 +1,4 @@
+Routes
+======
+
+.. automodule:: miniflash.route
