@@ -1,10 +1,21 @@
-# MiniFlash
+<p align="center">
+  <img src="docs/logo.svg" width="128" height="128" alt="MiniFlash logo">
+</p>
 
-A small Clifford+T → lattice-surgery compiler. MiniFlash turns an OpenQASM 2.0
-circuit into a **tile program**: which tiles hold qubits, magic states and routes,
-and which tiles merge at each step. It minimizes spacetime volume (height × width
-× steps, walks included), checks every program with an independent verifier, and
-renders it as a glTF scene.
+<h1 align="center">MiniFlash</h1>
+
+<p align="center"><b>An <i>ultra fast</i> Clifford+T &rarr; lattice-surgery compiler.</b></p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2626d9.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-d92626.svg" alt="python 3.9+">
+  <img src="https://img.shields.io/badge/pure-Python-26bf40.svg" alt="pure python">
+</p>
+
+MiniFlash turns an OpenQASM 2.0 circuit into a **tile program**: which tiles hold
+qubits, magic states and routes, and which tiles merge at each step. It minimizes
+spacetime volume (height × width × steps, walks included), checks every program
+with an independent verifier, and renders it as a glTF scene.
 
 ## Quickstart
 
@@ -15,10 +26,9 @@ python main.py benchmarks/algorithms/ghz8.qasm -o ghz8.gltf
 ```
 
 Open the `.gltf` in any viewer, e.g. <https://gltf-viewer.donmccurdy.com/>. Time
-runs upward, two layers per step. Qubits are red pillars. A CNOT splits at its
-first turn, where an ancilla climbs: the half from the control's Z side sits on the
-lower layer (blue), the half into the target's X side on the upper layer (red).
-T merges end at green magic states; walks between partitions are orange.
+runs upward, two layers per step. Qubits are red pillars; a CNOT's two halves sit
+on the lower (blue) and upper (red) layer, T merges end at green magic states, and
+walks between partitions are orange.
 
 Several circuits print a CSV, one verified row each:
 
@@ -40,73 +50,30 @@ flash.write_gltf(program, "tof3.gltf")
 ## Options
 
 - `--solver`: a step of the compiler's ladder, `vanilla`, `dependency`, `routing`,
-  `spacing`, `placement`, `layout` (default), or a development control (`compact`,
-  `staged`, `placed`). `--shapes N` compares the N smallest site shapes.
-- `--factory HxWxT`: magic-state factory, H tiles deep, W wide, one state every T
-  steps. Alone, one factory sits behind every magic tile.
-- `--factories F`: F shared factories feed the whole chip through delivery rings
-  around it; `-o` draws them.
+  `spacing`, `placement`, `layout` (default). `--shapes N` compares the N smallest
+  site shapes.
 - `--init`: the initial placement the anneal starts from: `spectral` (default),
-  `random`, `gordian`, `gordian-l`, `mincut`, `aplace` or `mpl`
-  (`miniflash/synthesis/initial.py`); `scripts/benchmark_init.py` compares them.
+  `random`, `gordian`, `gordian-l`, `mincut`, `aplace` or `mpl`.
+- `--factory HxWxT`: magic-state factory, H tiles deep, W wide, one state every T
+  steps, one behind every magic tile. `--factories F`: F shared factories feed the
+  chip through delivery rings instead. Without either, magic supply is unlimited.
 - `--json FILE`: save the tile program.
 
-Without `--factory`, magic supply is unlimited. Single-qubit Cliffords are free.
-
 `benchmarks/` holds 206 circuits (GHZ, BV, DJ, QFT, random Clifford, graph states,
-Galois-field multipliers, Toffoli, ...). Those in `benchmarks/qualtran/` also carry
-the call tree of the Qualtran bloq they come from; see `benchmarks/README.md`.
+Galois-field multipliers, Toffoli, ...); see `benchmarks/README.md`.
 
-## Hierarchical compilation
+## Citation
 
-Compile repeated subroutines once on a common floorplan, then compose their
-routes before partitioning and compaction:
+If you use MiniFlash in your research, please cite:
 
-```bash
-python main.py benchmarks/qualtran/modexp-3.json --hierarchical --json out/modexp.json
-# The same input compiled as a flat DAG:
-python main.py benchmarks/qualtran/modexp-3.json
-```
-
-```python
-hierarchy = flash.Hierarchy.load("benchmarks/qualtran/modexp-3.json")
-compiler = flash.make("layout")
-program = compiler.solve_hierarchy(hierarchy)
-report = flash.verify(hierarchy.problem, program)
-print(compiler.hierarchy_stats)  # calls, distinct cells, and pairs actually routed
-```
-
-Compilation follows the call tree bottom-up, with no size cutoff. It routes each
-distinct leaf (and direct gate run between children), composes each parent from
-its cached children, and caches the parent for reuse up to the root. Leaves
-match exact pair sequences on the same global qubits; parents also preserve
-child boundaries. Unused program qubits remain routing obstacles.
-
-Child steps keep their order and grouping, but calls may overlap once their
-qubits are available. The composer reroutes conflicts or waits. The root enforces
-dependencies and magic-state supply across all nested calls, then the usual
-partitioning, compaction, and walk passes run. The usual `--factory`,
-`--factories`, `--shapes`, rendering, and output options apply; hierarchical
-compilation requires a solver with routing enabled.
-
-Placement uses each distinct leaf's ASAP layers weighted by its expanded call
-count, so ancestor templates do not double-count gates. This preserves interaction
-frequencies while approximating overlap between calls. `--hierarchy-placement flat`
-uses the full DAG's placement instead, for controlled comparisons. The hierarchy
-loader and output program still expand all calls; cached parent schedules also
-store expanded routes. Reuse saves repeated optimization work, not that memory cost.
-
-`hierarchy_stats` reports all cached `cells`, split into `leaf_cells` and
-`composed_cells`. `calls` counts invocations across all levels, including the root
-and direct gate runs; `leaf_calls` counts just the leaves. `routed_pairs` counts
-pairs sent to the leaf router once per distinct leaf. Parent composition may
-reroute conflicts, and its time is reported separately as `compose_s`.
-
-Run a verified comparison of eight Qualtran circuits (flat, weighted cell
-placement, and cell reuse with flat placement):
-
-```bash
-OPENBLAS_NUM_THREADS=1 python scripts/benchmark_hierarchy.py --output out/hierarchy.csv
+```bibtex
+@article{wang2026miniflash,
+  title   = {Demand-Driven Routing Space for Lattice-Surgery Compilation},
+  author  = {Wang, Hanyu and Lin, Wan-Hsuan and Chen, Zihan and Zhang, Eddy Z. and Cong, Jason},
+  journal = {arXiv preprint arXiv:2610.30747},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2610.30747}
+}
 ```
 
 ## License

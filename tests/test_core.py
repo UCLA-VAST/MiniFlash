@@ -1,3 +1,4 @@
+"""The core model: problems, layouts, routes, programs, verification, and the flat compiler ladder."""
 import sys
 from pathlib import Path
 
