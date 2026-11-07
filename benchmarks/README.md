@@ -4,17 +4,17 @@
 
 | folder | count | description |
 |---|---|---|
-| `algorithms/` | 41 | GHZ, BV, DJ, QFT, QPE, QAOA, Grover, Shor, HWB, Hamming, VQE, Wstate |
-| `arithmetic/` | 17 | adders (rc/csla/csum/qcla/vbe/mod/ftcb), `qcla-com`, `qcla-mod`, `mod5-4` |
-| `clifford/` | 22 | random Clifford: `-cxNN` batch (h/cx/s, by cx ratio) + `-dNN` batch (h/cx/cz, by depth); `clifford-complete-4`, `random-500` |
-| `ftcb/` | 47 | FT compilation benchmarks (Fermi-Hubbard, Heisenberg, Ising, QFT, QPE, HHL, QSVT) |
-| `gf-mult/` | 15 | GF(2^N) Galois-field multipliers |
-| `graphstate/` | 12 | graphstate{4,8,16} chain/complete/dense/grid/linear/rand/ring |
-| `parallel-t/` | 8 | layers of parallel T gates, `par-t-N` |
-| `synthlr/` | 5 | SynthesizeLR worst-case linear-reversible CNOT circuits (arXiv:2510.10967, DQI) |
-| `t-factory/` | 8 | t-factory injection fixtures (chain/layer/pair/sandwich/smoke/clifford3) |
-| `toffoli/` | 8 | Toffoli (`tof-N`) and Barenco-Toffoli |
-| `qualtran/` | 23 | Qualtran bloqs with their call tree: adders, modular arithmetic up to exponentiation, GF(2^N) multiply and invert, comparison, QROM, Hubbard SELECT |
+| `algorithms/` | 41 | GHZ (3 to 16 qubits), Bernstein-Vazirani and Deutsch-Jozsa (16 to 100), QFT, QPE, QAOA, Grover, Shor-15, HWB, Hamming-15, VQE, W state |
+| `arithmetic/` | 17 | ripple-carry, VBE, QCLA, carry-select and carry-sum adders, the ftcb adders (4 to 64 qubits), modular adders, multiplier and reduction, `mod5-4` |
+| `clifford/` | 22 | random Clifford circuits by qubit count and CX ratio (`-cx25/50/75`) or depth (`-d50/100`), `clifford-complete-4`, `random-500` |
+| `ftcb/` | 47 | fault-tolerant compilation benchmarks from 4 to 200 qubits: Fermi-Hubbard, Heisenberg and Ising on chains, square and triangular lattices, QFT, QPE on Hubbard, HHL, QSVT banded circulant |
+| `gf-mult/` | 15 | GF(2^N) Galois-field multipliers, `gf2eN-mult` for N from 4 to 256 and three small `gfmult` variants |
+| `graphstate/` | 12 | graph states on 4, 8 and 16 qubits: chain, complete, dense, grid, linear, random, ring |
+| `parallel-t/` | 8 | layers of parallel T gates (`par-t-N`) and small T-ordering fixtures (chain, CX commutation, CX dependency, die) |
+| `qualtran/` | 23 | Qualtran bloqs with their call tree: adders, modular add, multiply and exponentiation, GF(2^N) multiply and invert, comparison (`lte`), multi-controlled AND, QROM, Hubbard SELECT |
+| `synthlr/` | 5 | SynthesizeLR worst-case linear-reversible CNOT circuits on 4 to 12 qubits |
+| `t-factory/` | 8 | magic-state injection fixtures: chain, layer, pair, sandwich, smoke, Clifford-3 |
+| `toffoli/` | 8 | Toffoli `tof-N` and Barenco-Toffoli `barenco-tof-N` for N in 3, 4, 5, 10 |
 
 miniflash compiles Clifford+T: h/cx/x/s/sdg/t/tdg directly,
 z/y/cz/swap/id/rz(k*pi/2)/ccx by auto-expansion. Circuits with gates
