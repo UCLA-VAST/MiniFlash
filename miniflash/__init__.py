@@ -15,7 +15,7 @@ from .verify import Report, VerifyError, verify
 from .gltf import write_gltf
 from .hierarchy import Def, Hierarchy, Node
 
-__version__ = "1.0.0a0"
+__version__ = "0.0.3"
 
 __all__ = ["MAGIC", "Builder", "Pair", "Problem", "from_circuit", "read_qasm", "to_dot", "parse", "Layout", "Mapping",
            "Route", "Segment", "check_route", "Program", "Step", "Vertex", "Placement", "place", "schedule", "compact",

@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="miniflash",
-    version="1.0.0a0",
+    version="0.0.3",
     description="QASM -> lattice-surgery tile program compiler with a glTF renderer",
     license="MIT",
     packages=["miniflash", "miniflash.synthesis", "miniflash.resynthesis"],
